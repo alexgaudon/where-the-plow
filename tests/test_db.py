@@ -82,6 +82,50 @@ def test_insert_positions_dedup():
     os.unlink(path)
 
 
+def test_init_loads_spatial_extension():
+    db, path = make_db()
+    result = db.conn.execute("SELECT ST_AsText(ST_Point(1.0, 2.0))").fetchone()
+    assert result[0] == "POINT (1 2)"
+    db.close()
+    os.unlink(path)
+
+
+def test_positions_has_geom_column():
+    db, path = make_db()
+    cols = db.conn.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name='positions'"
+    ).fetchall()
+    col_names = {c[0] for c in cols}
+    assert "geom" in col_names
+    db.close()
+    os.unlink(path)
+
+
+def test_insert_positions_populates_geom():
+    db, path = make_db()
+    now = datetime.now(timezone.utc)
+    ts = datetime(2026, 2, 19, 12, 0, 0, tzinfo=timezone.utc)
+    positions = [
+        {
+            "vehicle_id": "v1",
+            "timestamp": ts,
+            "longitude": -52.73,
+            "latitude": 47.56,
+            "bearing": 135,
+            "speed": 13.4,
+            "is_driving": "maybe",
+        },
+    ]
+    db.insert_positions(positions, now)
+    row = db.conn.execute(
+        "SELECT ST_X(geom), ST_Y(geom) FROM positions WHERE vehicle_id='v1'"
+    ).fetchone()
+    assert abs(row[0] - (-52.73)) < 0.001
+    assert abs(row[1] - 47.56) < 0.001
+    db.close()
+    os.unlink(path)
+
+
 def test_get_stats_empty():
     db, path = make_db()
     stats = db.get_stats()

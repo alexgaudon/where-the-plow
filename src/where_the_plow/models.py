@@ -1,0 +1,62 @@
+# src/where_the_plow/models.py
+from pydantic import BaseModel, Field
+
+
+class PointGeometry(BaseModel):
+    type: str = Field(default="Point", json_schema_extra={"example": "Point"})
+    coordinates: list[float] = Field(
+        ...,
+        description="[longitude, latitude]",
+        json_schema_extra={"example": [-52.731, 47.564]},
+    )
+
+
+class FeatureProperties(BaseModel):
+    vehicle_id: str = Field(..., description="Unique vehicle identifier")
+    description: str = Field(
+        ...,
+        description="Human-readable vehicle label",
+        json_schema_extra={"example": "2222 SA PLOW TRUCK"},
+    )
+    vehicle_type: str = Field(
+        ...,
+        description="Vehicle category",
+        json_schema_extra={"example": "SA PLOW TRUCK"},
+    )
+    speed: float | None = Field(None, description="Speed in km/h")
+    bearing: int | None = Field(None, description="Heading in degrees (0-360)")
+    is_driving: str | None = Field(None, description="Driving status: 'maybe' or 'no'")
+    timestamp: str = Field(..., description="Position timestamp (ISO 8601)")
+
+
+class Feature(BaseModel):
+    type: str = Field(default="Feature")
+    geometry: PointGeometry
+    properties: FeatureProperties
+
+
+class Pagination(BaseModel):
+    limit: int = Field(..., description="Requested page size")
+    count: int = Field(..., description="Number of features in this page")
+    next_cursor: str | None = Field(
+        None, description="Cursor for next page (ISO 8601 timestamp)"
+    )
+    has_more: bool = Field(
+        ..., description="Whether more results exist beyond this page"
+    )
+
+
+class FeatureCollection(BaseModel):
+    type: str = Field(default="FeatureCollection")
+    features: list[Feature]
+    pagination: Pagination
+
+
+class StatsResponse(BaseModel):
+    total_positions: int = Field(..., description="Total position records stored")
+    total_vehicles: int = Field(..., description="Total unique vehicles seen")
+    active_vehicles: int = Field(
+        0, description="Vehicles currently active (isDriving='maybe')"
+    )
+    earliest: str | None = Field(None, description="Earliest position timestamp")
+    latest: str | None = Field(None, description="Latest position timestamp")

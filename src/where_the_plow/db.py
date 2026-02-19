@@ -9,6 +9,9 @@ class Database:
         self.conn = duckdb.connect(path)
 
     def init(self):
+        self.conn.execute("INSTALL spatial")
+        self.conn.execute("LOAD spatial")
+
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS vehicles (
                 vehicle_id    VARCHAR PRIMARY KEY,
@@ -29,6 +32,7 @@ class Database:
                 collected_at  TIMESTAMPTZ NOT NULL,
                 longitude     DOUBLE NOT NULL,
                 latitude      DOUBLE NOT NULL,
+                geom          GEOMETRY,
                 bearing       INTEGER,
                 speed         DOUBLE,
                 is_driving    VARCHAR,
@@ -39,6 +43,19 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_positions_time_geo
                 ON positions (timestamp, latitude, longitude)
         """)
+
+        # Migration: add geom column to existing tables that lack it
+        cols = self.conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='positions' AND column_name='geom'"
+        ).fetchall()
+        if not cols:
+            self.conn.execute("ALTER TABLE positions ADD COLUMN geom GEOMETRY")
+
+        # Backfill geom for existing rows
+        self.conn.execute(
+            "UPDATE positions SET geom = ST_Point(longitude, latitude) WHERE geom IS NULL"
+        )
 
     def upsert_vehicles(self, vehicles: list[dict], now: datetime):
         for v in vehicles:
@@ -62,13 +79,15 @@ class Database:
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO positions
-                    (vehicle_id, timestamp, collected_at, longitude, latitude, bearing, speed, is_driving)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (vehicle_id, timestamp, collected_at, longitude, latitude, geom, bearing, speed, is_driving)
+                VALUES (?, ?, ?, ?, ?, ST_Point(?, ?), ?, ?, ?)
             """,
                 [
                     p["vehicle_id"],
                     p["timestamp"],
                     collected_at,
+                    p["longitude"],
+                    p["latitude"],
                     p["longitude"],
                     p["latitude"],
                     p["bearing"],
