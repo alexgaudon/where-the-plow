@@ -76,6 +76,57 @@
     #vehicle-detail .detail-close:hover {
       color: #e5e7eb;
     }
+    #mode-toggle {
+      display: flex;
+      margin: 8px 0;
+      border-radius: 4px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.15);
+    }
+    #mode-toggle button {
+      flex: 1;
+      padding: 5px 0;
+      border: none;
+      background: transparent;
+      color: #9ca3af;
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    #mode-toggle button.active {
+      background: rgba(96, 165, 250, 0.25);
+      color: #f9fafb;
+    }
+    #mode-toggle button:hover:not(.active) {
+      background: rgba(255,255,255,0.05);
+    }
+    #coverage-panel {
+      display: none;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(255,255,255,0.12);
+    }
+    #coverage-panel label {
+      color: #9ca3af;
+      font-size: 12px;
+    }
+    #time-slider {
+      width: 100%;
+      margin: 6px 0;
+      accent-color: #60a5fa;
+    }
+    #slider-label {
+      color: #f9fafb;
+      font-size: 12px;
+      text-align: center;
+      display: block;
+    }
+    #coverage-loading {
+      color: #9ca3af;
+      font-size: 12px;
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -83,6 +134,10 @@
   <div id="info-panel">
     <h3>Where the Plow</h3>
     <a href="/docs">API Documentation</a>
+    <div id="mode-toggle">
+      <button id="btn-realtime" class="active">Realtime</button>
+      <button id="btn-coverage">Coverage</button>
+    </div>
     <div id="vehicle-count">Loading vehicles...</div>
     <div id="vehicle-detail">
       <span class="detail-close" id="detail-close">&times;</span>
@@ -91,6 +146,12 @@
       <div class="detail-row" id="detail-speed"></div>
       <div class="detail-row" id="detail-bearing"></div>
       <div class="detail-row" id="detail-updated"></div>
+    </div>
+    <div id="coverage-panel">
+      <label>Up to:</label>
+      <span id="slider-label"></span>
+      <input type="range" id="time-slider" min="0" max="1000" value="1000" />
+      <div id="coverage-loading">Loading coverage data...</div>
     </div>
   </div>
   <script>
@@ -110,6 +171,18 @@
         minute: '2-digit',
         second: '2-digit',
       });
+    }
+
+    const VEHICLE_COLORS = {
+      'SA PLOW TRUCK': '#2563eb',
+      'TA PLOW TRUCK': '#2563eb',
+      'LOADER': '#ea580c',
+      'GRADER': '#16a34a',
+    };
+    const DEFAULT_COLOR = '#6b7280';
+
+    function vehicleColor(type) {
+      return VEHICLE_COLORS[type] || DEFAULT_COLOR;
     }
 
     function updateVehicleCount(data) {
@@ -133,6 +206,19 @@
     const detailSpeed = document.getElementById('detail-speed');
     const detailBearing = document.getElementById('detail-bearing');
     const detailUpdated = document.getElementById('detail-updated');
+
+    let currentMode = 'realtime';
+    let refreshInterval = null;
+    let coverageData = null;
+    let coverageSince = null;
+    let coverageUntil = null;
+
+    const btnRealtime = document.getElementById('btn-realtime');
+    const btnCoverage = document.getElementById('btn-coverage');
+    const coveragePanelEl = document.getElementById('coverage-panel');
+    const timeSlider = document.getElementById('time-slider');
+    const sliderLabel = document.getElementById('slider-label');
+    const coverageLoading = document.getElementById('coverage-loading');
 
     document.getElementById('detail-close').addEventListener('click', () => {
       closeDetail();
@@ -310,6 +396,146 @@
       showDetail(feature.properties);
     }
 
+    // --- Mode switching ---
+    btnRealtime.addEventListener('click', () => switchMode('realtime'));
+    btnCoverage.addEventListener('click', () => switchMode('coverage'));
+
+    async function switchMode(mode) {
+      if (mode === currentMode) return;
+      currentMode = mode;
+      btnRealtime.classList.toggle('active', mode === 'realtime');
+      btnCoverage.classList.toggle('active', mode === 'coverage');
+      if (mode === 'realtime') {
+        enterRealtime();
+      } else {
+        await enterCoverage();
+      }
+    }
+
+    function enterRealtime() {
+      clearCoverageLayers();
+      coveragePanelEl.style.display = 'none';
+      coverageData = null;
+      if (map.getLayer('vehicle-circles')) {
+        map.setLayoutProperty('vehicle-circles', 'visibility', 'visible');
+      }
+      document.getElementById('vehicle-count').style.display = '';
+      startAutoRefresh();
+    }
+
+    async function enterCoverage() {
+      stopAutoRefresh();
+      closeDetail();
+      if (map.getLayer('vehicle-circles')) {
+        map.setLayoutProperty('vehicle-circles', 'visibility', 'none');
+      }
+      document.getElementById('vehicle-count').style.display = 'none';
+      coveragePanelEl.style.display = 'block';
+      coverageLoading.style.display = 'block';
+      timeSlider.value = 1000;
+
+      coverageUntil = new Date();
+      coverageSince = new Date(coverageUntil.getTime() - ONE_DAY_MS);
+      const resp = await fetch(
+        `/coverage?since=${coverageSince.toISOString()}&until=${coverageUntil.toISOString()}`
+      );
+      coverageData = await resp.json();
+      coverageLoading.style.display = 'none';
+      renderCoverage(1000);
+    }
+
+    // --- Coverage rendering ---
+    function sliderToTime(val) {
+      const range = coverageUntil.getTime() - coverageSince.getTime();
+      return new Date(coverageSince.getTime() + (val / 1000) * range);
+    }
+
+    timeSlider.addEventListener('input', (e) => {
+      renderCoverage(parseInt(e.target.value));
+    });
+
+    function clearCoverageLayers() {
+      if (map.getLayer('coverage-lines')) map.removeLayer('coverage-lines');
+      if (map.getSource('coverage-lines')) map.removeSource('coverage-lines');
+    }
+
+    function renderCoverage(sliderVal) {
+      if (!coverageData) return;
+      const cutoff = sliderToTime(sliderVal);
+      sliderLabel.textContent = formatTimestamp(cutoff.toISOString());
+
+      const sinceMs = coverageSince.getTime();
+      const rangeMs = cutoff.getTime() - sinceMs;
+
+      const segmentFeatures = [];
+      for (const feature of coverageData.features) {
+        const coords = feature.geometry.coordinates;
+        const timestamps = feature.properties.timestamps;
+        const color = vehicleColor(feature.properties.vehicle_type);
+
+        for (let i = 0; i < coords.length - 1; i++) {
+          const tMs = new Date(timestamps[i]).getTime();
+          const tNextMs = new Date(timestamps[i + 1]).getTime();
+          if (tNextMs > cutoff.getTime()) break;
+
+          const progress = rangeMs > 0 ? (tMs - sinceMs) / rangeMs : 1;
+          const opacity = 0.15 + progress * 0.65;
+
+          segmentFeatures.push({
+            type: 'Feature',
+            geometry: {
+              type: 'LineString',
+              coordinates: [coords[i], coords[i + 1]],
+            },
+            properties: { seg_opacity: opacity, seg_color: color },
+          });
+        }
+      }
+
+      const data = { type: 'FeatureCollection', features: segmentFeatures };
+      const source = map.getSource('coverage-lines');
+      if (source) {
+        source.setData(data);
+      } else {
+        map.addSource('coverage-lines', { type: 'geojson', data });
+        map.addLayer({
+          id: 'coverage-lines',
+          type: 'line',
+          source: 'coverage-lines',
+          paint: {
+            'line-color': ['get', 'seg_color'],
+            'line-width': 3,
+            'line-opacity': ['get', 'seg_opacity'],
+          },
+        });
+      }
+    }
+
+    // --- Auto-refresh (start/stop) ---
+    function startAutoRefresh() {
+      if (refreshInterval) return;
+      refreshInterval = setInterval(async () => {
+        if (currentMode !== 'realtime') return;
+        try {
+          const rawData = await fetchVehicles();
+          const freshData = filterRecentFeatures(rawData);
+          map.getSource('vehicles').setData(freshData);
+          updateVehicleCount(freshData);
+          updateDetailFromData(freshData);
+          refreshTrail();
+        } catch (err) {
+          console.error('Failed to refresh vehicles:', err);
+        }
+      }, 6000);
+    }
+
+    function stopAutoRefresh() {
+      if (refreshInterval) {
+        clearInterval(refreshInterval);
+        refreshInterval = null;
+      }
+    }
+
     map.on('load', async () => {
       const rawData = await fetchVehicles();
       const data = filterRecentFeatures(rawData);
@@ -360,18 +586,7 @@
       });
 
       // Auto-refresh
-      setInterval(async () => {
-        try {
-          const rawData = await fetchVehicles();
-          const freshData = filterRecentFeatures(rawData);
-          map.getSource('vehicles').setData(freshData);
-          updateVehicleCount(freshData);
-          updateDetailFromData(freshData);
-          refreshTrail();
-        } catch (err) {
-          console.error('Failed to refresh vehicles:', err);
-        }
-      }, 6000);
+      startAutoRefresh();
     });
   </script>
 </body>
