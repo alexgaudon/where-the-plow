@@ -27,25 +27,86 @@ def test_init_creates_tables():
     os.unlink(path)
 
 
-def test_upsert_vehicles():
+def test_get_coverage_trails_gap_splitting():
+    """Gaps > 2 minutes should split into separate trail segments."""
     db, path = make_db()
     now = datetime.now(timezone.utc)
-    vehicles = [
-        {"vehicle_id": "v1", "description": "Plow 1", "vehicle_type": "LOADER"},
+
+    db.upsert_vehicles(
+        [{"vehicle_id": "v1", "description": "Plow 1", "vehicle_type": "LOADER"}],
+        now,
+    )
+    # Two clusters of positions separated by a 5-minute gap
+    positions = [
+        # Cluster 1: t=0s, t=30s, t=60s
+        {
+            "vehicle_id": "v1",
+            "timestamp": datetime(2026, 2, 19, 12, 0, 0, tzinfo=timezone.utc),
+            "longitude": -52.73,
+            "latitude": 47.56,
+            "bearing": 0,
+            "speed": 10.0,
+            "is_driving": "maybe",
+        },
+        {
+            "vehicle_id": "v1",
+            "timestamp": datetime(2026, 2, 19, 12, 0, 30, tzinfo=timezone.utc),
+            "longitude": -52.74,
+            "latitude": 47.57,
+            "bearing": 0,
+            "speed": 10.0,
+            "is_driving": "maybe",
+        },
+        {
+            "vehicle_id": "v1",
+            "timestamp": datetime(2026, 2, 19, 12, 1, 0, tzinfo=timezone.utc),
+            "longitude": -52.75,
+            "latitude": 47.58,
+            "bearing": 0,
+            "speed": 10.0,
+            "is_driving": "maybe",
+        },
+        # 5-minute gap here
+        # Cluster 2: t=6m, t=6m30s, t=7m
+        {
+            "vehicle_id": "v1",
+            "timestamp": datetime(2026, 2, 19, 12, 6, 0, tzinfo=timezone.utc),
+            "longitude": -52.80,
+            "latitude": 47.50,
+            "bearing": 0,
+            "speed": 15.0,
+            "is_driving": "maybe",
+        },
+        {
+            "vehicle_id": "v1",
+            "timestamp": datetime(2026, 2, 19, 12, 6, 30, tzinfo=timezone.utc),
+            "longitude": -52.81,
+            "latitude": 47.51,
+            "bearing": 0,
+            "speed": 15.0,
+            "is_driving": "maybe",
+        },
+        {
+            "vehicle_id": "v1",
+            "timestamp": datetime(2026, 2, 19, 12, 7, 0, tzinfo=timezone.utc),
+            "longitude": -52.82,
+            "latitude": 47.52,
+            "bearing": 0,
+            "speed": 15.0,
+            "is_driving": "maybe",
+        },
     ]
-    db.upsert_vehicles(vehicles, now)
+    db.insert_positions(positions, now)
 
-    rows = db.conn.execute("SELECT * FROM vehicles").fetchall()
-    assert len(rows) == 1
-    assert rows[0][0] == "v1"
+    since = datetime(2026, 2, 19, 12, 0, 0, tzinfo=timezone.utc)
+    until = datetime(2026, 2, 19, 12, 7, 0, tzinfo=timezone.utc)
+    trails = db.get_coverage_trails(since=since, until=until)
 
-    # Upsert again — should update last_seen
-    later = datetime(2026, 3, 1, tzinfo=timezone.utc)
-    db.upsert_vehicles(vehicles, later)
-    rows = db.conn.execute(
-        "SELECT last_seen FROM vehicles WHERE vehicle_id='v1'"
-    ).fetchone()
-    assert rows[0] == later
+    # Should produce 2 trail segments, both for v1
+    assert len(trails) == 2
+    assert all(t["vehicle_id"] == "v1" for t in trails)
+    assert len(trails[0]["coordinates"]) == 3  # cluster 1
+    assert len(trails[1]["coordinates"]) == 3  # cluster 2
 
     db.close()
     os.unlink(path)

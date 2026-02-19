@@ -210,8 +210,9 @@ class Database:
         since: datetime,
         until: datetime,
         min_interval_s: float = 30.0,
+        max_gap_s: float = 120.0,
     ) -> list[dict]:
-        """Get per-vehicle LineString trails in a time range, downsampled."""
+        """Get per-vehicle LineString trails in a time range, downsampled and gap-split."""
         query = """
             SELECT p.vehicle_id, p.timestamp, p.longitude, p.latitude,
                    v.description, v.vehicle_type
@@ -242,18 +243,38 @@ class Database:
             if len(sampled) < 2:
                 continue
 
-            trails.append(
-                {
-                    "vehicle_id": vid,
-                    "description": sampled[0][4],
-                    "vehicle_type": sampled[0][5],
-                    "coordinates": [[p[2], p[3]] for p in sampled],
-                    "timestamps": [
-                        p[1].isoformat() if isinstance(p[1], datetime) else str(p[1])
-                        for p in sampled
-                    ],
-                }
-            )
+            # Split at gaps > max_gap_s
+            segments = []
+            current_segment = [sampled[0]]
+            for pt in sampled[1:]:
+                gap = (pt[1] - current_segment[-1][1]).total_seconds()
+                if gap > max_gap_s:
+                    if len(current_segment) >= 2:
+                        segments.append(current_segment)
+                    current_segment = [pt]
+                else:
+                    current_segment.append(pt)
+            if len(current_segment) >= 2:
+                segments.append(current_segment)
+
+            description = sampled[0][4]
+            vehicle_type = sampled[0][5]
+
+            for seg in segments:
+                trails.append(
+                    {
+                        "vehicle_id": vid,
+                        "description": description,
+                        "vehicle_type": vehicle_type,
+                        "coordinates": [[p[2], p[3]] for p in seg],
+                        "timestamps": [
+                            p[1].isoformat()
+                            if isinstance(p[1], datetime)
+                            else str(p[1])
+                            for p in seg
+                        ],
+                    }
+                )
 
         return trails
 
