@@ -50,12 +50,31 @@
       font-size: 12px;
       margin-top: 6px;
     }
-    .maplibregl-popup-content {
-      font-family: system-ui, -apple-system, sans-serif;
-      font-size: 13px;
-      line-height: 1.5;
-      padding: 10px 14px;
-      border-radius: 6px;
+    #vehicle-detail {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(255,255,255,0.12);
+      display: none;
+    }
+    #vehicle-detail .detail-name {
+      font-weight: 600;
+      color: #f9fafb;
+      margin-bottom: 2px;
+    }
+    #vehicle-detail .detail-row {
+      color: #9ca3af;
+      font-size: 12px;
+    }
+    #vehicle-detail .detail-close {
+      float: right;
+      cursor: pointer;
+      color: #6b7280;
+      font-size: 16px;
+      line-height: 1;
+      margin: -2px -4px 0 8px;
+    }
+    #vehicle-detail .detail-close:hover {
+      color: #e5e7eb;
     }
   </style>
 </head>
@@ -65,6 +84,14 @@
     <h3>Where the Plow</h3>
     <a href="/docs">API Documentation</a>
     <div id="vehicle-count">Loading vehicles...</div>
+    <div id="vehicle-detail">
+      <span class="detail-close" id="detail-close">&times;</span>
+      <div class="detail-name" id="detail-name"></div>
+      <div class="detail-row" id="detail-type"></div>
+      <div class="detail-row" id="detail-speed"></div>
+      <div class="detail-row" id="detail-bearing"></div>
+      <div class="detail-row" id="detail-updated"></div>
+    </div>
   </div>
   <script>
     const map = new maplibregl.Map({
@@ -96,40 +123,196 @@
       return resp.json();
     }
 
-    // Track the currently open popup and which vehicle it belongs to
-    let activePopup = null;
+    // Track the currently selected vehicle
     let activeVehicleId = null;
+    let activeVehicleTimestamp = null;
 
-    function buildPopupHtml(p) {
-      return `
-        <div>
-          <strong>${p.description}</strong><br/>
-          ${p.vehicle_type}<br/>
-          Speed: ${p.speed} km/h<br/>
-          Bearing: ${p.bearing}&deg;<br/>
-          Updated: ${formatTimestamp(p.timestamp)}
-        </div>
-      `;
+    const detailPanel = document.getElementById('vehicle-detail');
+    const detailName = document.getElementById('detail-name');
+    const detailType = document.getElementById('detail-type');
+    const detailSpeed = document.getElementById('detail-speed');
+    const detailBearing = document.getElementById('detail-bearing');
+    const detailUpdated = document.getElementById('detail-updated');
+
+    document.getElementById('detail-close').addEventListener('click', () => {
+      closeDetail();
+    });
+
+    function showDetail(p) {
+      detailName.textContent = p.description;
+      detailType.textContent = p.vehicle_type;
+      detailSpeed.textContent = 'Speed: ' + p.speed + ' km/h';
+      detailBearing.textContent = 'Bearing: ' + p.bearing + '\u00B0';
+      detailUpdated.textContent = 'Updated: ' + formatTimestamp(p.timestamp);
+      detailPanel.style.display = 'block';
     }
 
-    function updatePopupFromData(data) {
-      if (!activePopup || !activeVehicleId) return;
+    function closeDetail() {
+      detailPanel.style.display = 'none';
+      activeVehicleId = null;
+      activeVehicleTimestamp = null;
+      clearTrail();
+    }
+
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+    // Filter out vehicles with timestamps older than 24 hours
+    function filterRecentFeatures(data) {
+      const cutoff = Date.now() - ONE_DAY_MS;
+      return {
+        ...data,
+        features: data.features.filter(f => new Date(f.properties.timestamp).getTime() > cutoff),
+      };
+    }
+
+
+
+    // Fetch last 10 minutes of history for a vehicle, anchored to its latest timestamp
+    async function fetchTrail(vehicleId, vehicleTimestamp) {
+      let until, since;
+      if (vehicleTimestamp) {
+        until = new Date(vehicleTimestamp);
+        since = new Date(until.getTime() - 10 * 60 * 1000);
+      } else {
+        until = new Date();
+        since = new Date(until.getTime() - 10 * 60 * 1000);
+      }
+      const resp = await fetch(
+        `/vehicles/${vehicleId}/history?since=${since.toISOString()}&until=${until.toISOString()}&limit=2000`
+      );
+      return resp.json();
+    }
+
+    // Render a trail of fading circles for the selected vehicle
+    async function showTrail(vehicleId, vehicleTimestamp) {
+      clearTrail();
+      const data = await fetchTrail(vehicleId, vehicleTimestamp);
+      if (!data.features || data.features.length === 0) return;
+
+      const count = data.features.length;
+      // Assign an opacity to each point: oldest = most transparent, newest = most opaque
+      // Minimum opacity 0.15, max 0.7 (the current live dot stays full via the main layer)
+      const features = data.features.map((f, i) => ({
+        ...f,
+        properties: {
+          ...f.properties,
+          trail_opacity: count === 1 ? 0.7 : 0.15 + (i / (count - 1)) * 0.55,
+        },
+      }));
+
+      const trailData = { type: 'FeatureCollection', features };
+
+      // Build individual line segments so each can have its own opacity
+      const segmentFeatures = [];
+      for (let i = 0; i < features.length - 1; i++) {
+        const opacity = features[i].properties.trail_opacity;
+        segmentFeatures.push({
+          type: 'Feature',
+          geometry: {
+            type: 'LineString',
+            coordinates: [
+              features[i].geometry.coordinates,
+              features[i + 1].geometry.coordinates,
+            ],
+          },
+          properties: { seg_opacity: opacity },
+        });
+      }
+      const lineData = { type: 'FeatureCollection', features: segmentFeatures };
+
+      map.addSource('vehicle-trail', { type: 'geojson', data: trailData });
+      map.addSource('vehicle-trail-line', { type: 'geojson', data: lineData });
+
+      // Trail line segments with fading opacity
+      map.addLayer({
+        id: 'vehicle-trail-line',
+        type: 'line',
+        source: 'vehicle-trail-line',
+        paint: {
+          'line-color': '#60a5fa',
+          'line-width': 3,
+          'line-opacity': ['get', 'seg_opacity'],
+        },
+      }, 'vehicle-circles'); // insert below the main circles
+
+      // Trail dots with fading opacity
+      map.addLayer({
+        id: 'vehicle-trail-dots',
+        type: 'circle',
+        source: 'vehicle-trail',
+        paint: {
+          'circle-color': '#60a5fa',
+          'circle-radius': 4,
+          'circle-opacity': ['get', 'trail_opacity'],
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': 1,
+          'circle-stroke-opacity': ['*', ['get', 'trail_opacity'], 0.8],
+        },
+      }, 'vehicle-circles'); // insert below the main circles
+    }
+
+    function clearTrail() {
+      if (map.getLayer('vehicle-trail-dots')) map.removeLayer('vehicle-trail-dots');
+      if (map.getLayer('vehicle-trail-line')) map.removeLayer('vehicle-trail-line');
+      if (map.getSource('vehicle-trail')) map.removeSource('vehicle-trail');
+      if (map.getSource('vehicle-trail-line')) map.removeSource('vehicle-trail-line');
+    }
+
+    async function refreshTrail() {
+      if (!activeVehicleId) return;
+      const data = await fetchTrail(activeVehicleId, activeVehicleTimestamp);
+      if (!data.features || data.features.length === 0) return;
+
+      const count = data.features.length;
+      const features = data.features.map((f, i) => ({
+        ...f,
+        properties: {
+          ...f.properties,
+          trail_opacity: count === 1 ? 0.7 : 0.15 + (i / (count - 1)) * 0.55,
+        },
+      }));
+
+      const trailSource = map.getSource('vehicle-trail');
+      if (trailSource) {
+        trailSource.setData({ type: 'FeatureCollection', features });
+      }
+
+      const segmentFeatures = [];
+      for (let i = 0; i < features.length - 1; i++) {
+        segmentFeatures.push({
+          type: 'Feature',
+          geometry: {
+            type: 'LineString',
+            coordinates: [
+              features[i].geometry.coordinates,
+              features[i + 1].geometry.coordinates,
+            ],
+          },
+          properties: { seg_opacity: features[i].properties.trail_opacity },
+        });
+      }
+      const lineSource = map.getSource('vehicle-trail-line');
+      if (lineSource) {
+        lineSource.setData({ type: 'FeatureCollection', features: segmentFeatures });
+      }
+    }
+
+    function updateDetailFromData(data) {
+      if (!activeVehicleId) return;
       const feature = data.features.find(
         f => f.properties.vehicle_id === activeVehicleId
       );
       if (!feature) {
-        // Vehicle disappeared from results, close popup
-        activePopup.remove();
-        activePopup = null;
-        activeVehicleId = null;
+        closeDetail();
         return;
       }
-      activePopup.setLngLat(feature.geometry.coordinates);
-      activePopup.setHTML(buildPopupHtml(feature.properties));
+      activeVehicleTimestamp = feature.properties.timestamp;
+      showDetail(feature.properties);
     }
 
     map.on('load', async () => {
-      const data = await fetchVehicles();
+      const rawData = await fetchVehicles();
+      const data = filterRecentFeatures(rawData);
       updateVehicleCount(data);
 
       map.addSource('vehicles', {
@@ -165,39 +348,26 @@
         map.getCanvas().style.cursor = '';
       });
 
-      // Click popup
-      map.on('click', 'vehicle-circles', (e) => {
+      // Click: show detail panel + trail
+      map.on('click', 'vehicle-circles', async (e) => {
         const feature = e.features[0];
         const p = feature.properties;
-        const coords = feature.geometry.coordinates.slice();
-
-        // Handle wrapping
-        while (Math.abs(e.lngLat.lng - coords[0]) > 180) {
-          coords[0] += e.lngLat.lng > coords[0] ? 360 : -360;
-        }
-
-        // Remove old popup if any
-        if (activePopup) activePopup.remove();
 
         activeVehicleId = p.vehicle_id;
-        activePopup = new maplibregl.Popup({ offset: 12 })
-          .setLngLat(coords)
-          .setHTML(buildPopupHtml(p))
-          .addTo(map);
-
-        activePopup.on('close', () => {
-          activePopup = null;
-          activeVehicleId = null;
-        });
+        activeVehicleTimestamp = p.timestamp;
+        showDetail(p);
+        await showTrail(p.vehicle_id, p.timestamp);
       });
 
       // Auto-refresh
       setInterval(async () => {
         try {
-          const freshData = await fetchVehicles();
+          const rawData = await fetchVehicles();
+          const freshData = filterRecentFeatures(rawData);
           map.getSource('vehicles').setData(freshData);
           updateVehicleCount(freshData);
-          updatePopupFromData(freshData);
+          updateDetailFromData(freshData);
+          refreshTrail();
         } catch (err) {
           console.error('Failed to refresh vehicles:', err);
         }

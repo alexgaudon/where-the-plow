@@ -1,8 +1,13 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from where_the_plow.config import settings
+
+# The AVL API returns epoch-millisecond timestamps that represent
+# Newfoundland Standard Time (UTC-3:30) but are encoded as if they were UTC.
+# To get the real UTC time we must add the 3:30 offset back.
+_NST_CORRECTION = timedelta(hours=3, minutes=30)
 
 
 def parse_avl_response(data: dict) -> tuple[list[dict], list[dict]]:
@@ -13,7 +18,10 @@ def parse_avl_response(data: dict) -> tuple[list[dict], list[dict]]:
         geom = feature.get("geometry", {})
 
         vehicle_id = str(attrs["ID"])
-        ts = datetime.fromtimestamp(attrs["LocationDateTime"] / 1000, tz=timezone.utc)
+        naive_ts = datetime.fromtimestamp(
+            attrs["LocationDateTime"] / 1000, tz=timezone.utc
+        )
+        ts = naive_ts + _NST_CORRECTION
 
         vehicles.append(
             {

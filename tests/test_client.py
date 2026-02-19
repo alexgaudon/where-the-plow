@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from where_the_plow.client import parse_avl_response
 
 
@@ -47,6 +49,10 @@ def test_parse_avl_response():
     assert positions[0]["speed"] == 13.4
     assert positions[0]["is_driving"] == "maybe"
     assert positions[0]["timestamp"].year == 2026
+    # Epoch 1771491812000 is NST local time; after +3:30 correction → 12:33:32 UTC
+    assert positions[0]["timestamp"] == datetime(
+        2026, 2, 19, 12, 33, 32, tzinfo=timezone.utc
+    )
 
 
 def test_parse_empty_response():
