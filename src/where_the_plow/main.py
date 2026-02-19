@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from where_the_plow import collector
 from where_the_plow.config import settings
 from where_the_plow.db import Database
+from where_the_plow.routes import router
 
 logging.basicConfig(
     level=settings.log_level,
@@ -34,10 +35,17 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 
-app = FastAPI(title="Where the Plow", lifespan=lifespan)
+app = FastAPI(
+    title="Where the Plow",
+    description="Real-time and historical plow tracker for the City of St. John's. "
+    "All geo endpoints return GeoJSON FeatureCollections with cursor-based pagination.",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+app.include_router(router)
 
 
-@app.get("/health")
+@app.get("/health", tags=["system"])
 def health():
     db: Database = app.state.db
     stats = db.get_stats()
