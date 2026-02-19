@@ -52,6 +52,34 @@ class FeatureCollection(BaseModel):
     pagination: Pagination
 
 
+class LineStringGeometry(BaseModel):
+    type: str = Field(default="LineString")
+    coordinates: list[list[float]] = Field(
+        ..., description="Array of [longitude, latitude] coordinate pairs"
+    )
+
+
+class CoverageProperties(BaseModel):
+    vehicle_id: str = Field(..., description="Unique vehicle identifier")
+    vehicle_type: str = Field(..., description="Vehicle category")
+    description: str = Field(..., description="Human-readable vehicle label")
+    timestamps: list[str] = Field(
+        ...,
+        description="ISO 8601 timestamps parallel to coordinates array",
+    )
+
+
+class CoverageFeature(BaseModel):
+    type: str = Field(default="Feature")
+    geometry: LineStringGeometry
+    properties: CoverageProperties
+
+
+class CoverageFeatureCollection(BaseModel):
+    type: str = Field(default="FeatureCollection")
+    features: list[CoverageFeature]
+
+
 class StatsResponse(BaseModel):
     total_positions: int = Field(..., description="Total position records stored")
     total_vehicles: int = Field(..., description="Total unique vehicles seen")
