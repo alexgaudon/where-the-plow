@@ -9,6 +9,7 @@ from where_the_plow.db import Database
 def make_db():
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
+    os.unlink(path)  # DuckDB needs to create the file itself
     db = Database(path)
     db.init()
     return db, path
