@@ -8,11 +8,21 @@ Polls the city's public AVL (Automatic Vehicle Location) API every 6 seconds, st
 
 ## Running
 
+### Local
+
+Requires [uv](https://docs.astral.sh/uv/):
+
+```
+uv run uvicorn where_the_plow.main:app --host 0.0.0.0 --port 8000
+```
+
+### Docker
+
 ```
 docker compose up -d
 ```
 
-The app starts at `http://localhost:8000`. DuckDB data persists to `./data/plow.db`.
+Either way, the app starts at `http://localhost:8000`. DuckDB data persists to `./data/plow.db`.
 
 ### Environment variables
 
