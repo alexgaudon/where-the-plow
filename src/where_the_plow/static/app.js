@@ -354,10 +354,7 @@ function filterRecentFeatures(data) {
     };
 }
 
-/* ── Vehicle detail panel ──────────────────────────── */
-
-let activeVehicleId = null;
-let activeVehicleTimestamp = null;
+/* ── Vehicle detail panel: DOM refs ─────────────────── */
 
 const detailPanel = document.getElementById("vehicle-detail");
 const detailName = document.getElementById("detail-name");
@@ -365,37 +362,6 @@ const detailType = document.getElementById("detail-type");
 const detailSpeed = document.getElementById("detail-speed");
 const detailBearing = document.getElementById("detail-bearing");
 const detailUpdated = document.getElementById("detail-updated");
-
-function showDetail(p) {
-    detailName.textContent = p.description;
-    detailType.textContent = p.vehicle_type;
-    detailSpeed.textContent = "Speed: " + p.speed + " km/h";
-    detailBearing.textContent = "Bearing: " + p.bearing + "\u00B0";
-    detailUpdated.textContent = "Updated: " + formatTimestamp(p.timestamp);
-    detailPanel.style.display = "block";
-}
-
-function closeDetail() {
-    detailPanel.style.display = "none";
-    activeVehicleId = null;
-    activeVehicleTimestamp = null;
-    clearTrail();
-}
-
-function updateDetailFromData(data) {
-    if (!activeVehicleId) return;
-    const feature = data.features.find(
-        (f) => f.properties.vehicle_id === activeVehicleId,
-    );
-    if (!feature) {
-        closeDetail();
-        return;
-    }
-    activeVehicleTimestamp = feature.properties.timestamp;
-    showDetail(feature.properties);
-}
-
-document.getElementById("detail-close").addEventListener("click", closeDetail);
 
 /* ── Vehicle trails ────────────────────────────────── */
 
@@ -443,46 +409,7 @@ function buildTrailSegments(features) {
     return segments;
 }
 
-async function showTrail(vehicleId, vehicleTimestamp) {
-    const data = await fetchTrail(vehicleId, vehicleTimestamp);
-    if (!data.features || data.features.length === 0) return;
-
-    const features = addTrailOpacity(data.features);
-    const trailData = { type: "FeatureCollection", features };
-    const lineData = {
-        type: "FeatureCollection",
-        features: buildTrailSegments(features),
-    };
-
-    plowMap.showTrail(trailData, lineData);
-}
-
-function clearTrail() {
-    plowMap.clearTrail();
-}
-
-async function refreshTrail() {
-    if (!activeVehicleId) return;
-    const data = await fetchTrail(activeVehicleId, activeVehicleTimestamp);
-    if (!data.features || data.features.length === 0) return;
-
-    const features = addTrailOpacity(data.features);
-
-    plowMap.updateTrail(
-        { type: "FeatureCollection", features },
-        { type: "FeatureCollection", features: buildTrailSegments(features) },
-    );
-}
-
-/* ── Coverage: state & DOM refs ────────────────────── */
-
-let currentMode = "realtime";
-let refreshInterval = null;
-let coverageData = null;
-let coverageSince = null;
-let coverageUntil = null;
-let coveragePreset = "24";
-let coverageView = "lines";
+/* ── Coverage: DOM refs ────────────────────────────── */
 
 const btnRealtime = document.getElementById("btn-realtime");
 const btnCoverage = document.getElementById("btn-coverage");
@@ -497,7 +424,7 @@ const timeRangePresets = document.getElementById("time-range-presets");
 const btnLines = document.getElementById("btn-lines");
 const btnHeatmap = document.getElementById("btn-heatmap");
 
-/* ── Coverage: time range presets ──────────────────── */
+/* ── Stateless DOM helpers ─────────────────────────── */
 
 function formatRangeDate(d) {
     return d.toLocaleString(undefined, {
@@ -506,15 +433,6 @@ function formatRangeDate(d) {
         hour: "2-digit",
         minute: "2-digit",
     });
-}
-
-function updateRangeLabel() {
-    if (coverageSince && coverageUntil) {
-        coverageRangeLabel.textContent =
-            formatRangeDate(coverageSince) +
-            " \u2192 " +
-            formatRangeDate(coverageUntil);
-    }
 }
 
 function setPresetActive(value) {
@@ -526,62 +444,12 @@ function setPresetActive(value) {
     datePickerRow.classList.toggle("visible", value === "date");
 }
 
-async function loadCoverageForRange(since, until) {
-    const signal = plowMap.newCoverageSignal();
-
-    coverageSince = since;
-    coverageUntil = until;
-    updateRangeLabel();
-    coverageLoading.style.display = "block";
-    timeSlider.value = 1000;
-    plowMap.clearCoverage();
-    try {
-        const resp = await fetch(
-            `/coverage?since=${since.toISOString()}&until=${until.toISOString()}`,
-            { signal },
-        );
-        coverageData = await resp.json();
-    } catch (err) {
-        if (err.name === "AbortError") return;
-        throw err;
-    }
-    coverageLoading.style.display = "none";
-    renderCoverage(1000);
+function showLegend(type) {
+    document.getElementById("legend-vehicles").style.display =
+        type === "vehicles" ? "" : "none";
+    document.getElementById("legend-heatmap").style.display =
+        type === "heatmap" ? "" : "none";
 }
-
-async function loadCoverageForDate(dateStr) {
-    const start = new Date(dateStr + "T00:00:00");
-    const end = new Date(dateStr + "T23:59:59");
-    await loadCoverageForRange(start, end);
-}
-
-timeRangePresets.addEventListener("click", async (e) => {
-    const btn = e.target.closest("button");
-    if (!btn) return;
-    const value = btn.dataset.hours;
-    gtag("event", "coverage_preset", { preset: value });
-    coveragePreset = value;
-    setPresetActive(value);
-    if (value === "date") {
-        if (coverageDateInput.value) {
-            await loadCoverageForDate(coverageDateInput.value);
-        }
-        return;
-    }
-    const hours = parseInt(value);
-    const now = new Date();
-    await loadCoverageForRange(
-        new Date(now.getTime() - hours * 60 * 60 * 1000),
-        now,
-    );
-});
-
-coverageDateInput.addEventListener("change", async () => {
-    if (coveragePreset === "date" && coverageDateInput.value) {
-        gtag("event", "coverage_date_pick", { date: coverageDateInput.value });
-        await loadCoverageForDate(coverageDateInput.value);
-    }
-});
 
 async function initDatePickerBounds() {
     try {
@@ -597,14 +465,7 @@ async function initDatePickerBounds() {
 }
 initDatePickerBounds();
 
-/* ── Coverage: legend ──────────────────────────────── */
-
-function showLegend(type) {
-    document.getElementById("legend-vehicles").style.display =
-        type === "vehicles" ? "" : "none";
-    document.getElementById("legend-heatmap").style.display =
-        type === "heatmap" ? "" : "none";
-}
+/* ── Legend toggle (pure UI, no app state) ─────────── */
 
 const legendToggleBtn = document.getElementById("legend-toggle");
 const legendBody = document.getElementById("legend-body");
@@ -613,177 +474,331 @@ legendToggleBtn.addEventListener("click", () => {
     legendToggleBtn.classList.toggle("collapsed", collapsed);
 });
 
-/* ── Coverage: view toggle (lines/heatmap) ─────────── */
+/* ── PlowApp class ─────────────────────────────────── */
 
-btnLines.addEventListener("click", () => switchCoverageView("lines"));
-btnHeatmap.addEventListener("click", () => switchCoverageView("heatmap"));
+class PlowApp {
+    constructor(plowMap) {
+        this.map = plowMap;
 
-function switchCoverageView(view) {
-    if (view === coverageView) return;
-    gtag("event", "coverage_view", { view });
-    coverageView = view;
-    btnLines.classList.toggle("active", view === "lines");
-    btnHeatmap.classList.toggle("active", view === "heatmap");
-    showLegend(view === "heatmap" ? "heatmap" : "vehicles");
-    renderCoverage(parseInt(timeSlider.value));
+        // Mode
+        this.mode = "realtime";
+
+        // Realtime
+        this.refreshInterval = null;
+        this.activeVehicleId = null;
+        this.activeVehicleTimestamp = null;
+
+        // Coverage
+        this.coverageData = null;
+        this.coverageSince = null;
+        this.coverageUntil = null;
+        this.coveragePreset = "24";
+        this.coverageView = "lines";
+    }
+
+    /* ── Mode switching ────────────────────────────── */
+
+    async switchMode(mode) {
+        if (mode === this.mode) return;
+        gtag("event", "mode_switch", { mode });
+        this.mode = mode;
+        btnRealtime.classList.toggle("active", mode === "realtime");
+        btnCoverage.classList.toggle("active", mode === "coverage");
+        if (mode === "realtime") {
+            this.enterRealtime();
+        } else {
+            await this.enterCoverage();
+        }
+    }
+
+    enterRealtime() {
+        this.map.abortCoverage();
+        this.map.clearCoverage();
+        coveragePanelEl.style.display = "none";
+        this.coverageData = null;
+        this.map.setVehiclesVisible(true);
+        document.getElementById("vehicle-count").style.display = "";
+        document.getElementById("db-size").style.display = "";
+        showLegend("vehicles");
+        this.startAutoRefresh();
+    }
+
+    async enterCoverage() {
+        this.stopAutoRefresh();
+        this.closeDetail();
+        this.coverageView = "lines";
+        btnLines.classList.add("active");
+        btnHeatmap.classList.remove("active");
+        showLegend("vehicles");
+        this.map.setVehiclesVisible(false);
+        document.getElementById("vehicle-count").style.display = "none";
+        document.getElementById("db-size").style.display = "none";
+        coveragePanelEl.style.display = "block";
+
+        this.coveragePreset = "24";
+        setPresetActive("24");
+        const now = new Date();
+        await this.loadCoverageForRange(new Date(now.getTime() - ONE_DAY_MS), now);
+    }
+
+    /* ── Coverage ──────────────────────────────────── */
+
+    async loadCoverageForRange(since, until) {
+        const signal = this.map.newCoverageSignal();
+
+        this.coverageSince = since;
+        this.coverageUntil = until;
+        this.updateRangeLabel();
+        coverageLoading.style.display = "block";
+        timeSlider.value = 1000;
+        this.map.clearCoverage();
+        try {
+            const resp = await fetch(
+                `/coverage?since=${since.toISOString()}&until=${until.toISOString()}`,
+                { signal },
+            );
+            this.coverageData = await resp.json();
+        } catch (err) {
+            if (err.name === "AbortError") return;
+            throw err;
+        }
+        coverageLoading.style.display = "none";
+        this.renderCoverage(1000);
+    }
+
+    async loadCoverageForDate(dateStr) {
+        const start = new Date(dateStr + "T00:00:00");
+        const end = new Date(dateStr + "T23:59:59");
+        await this.loadCoverageForRange(start, end);
+    }
+
+    switchCoverageView(view) {
+        if (view === this.coverageView) return;
+        gtag("event", "coverage_view", { view });
+        this.coverageView = view;
+        btnLines.classList.toggle("active", view === "lines");
+        btnHeatmap.classList.toggle("active", view === "heatmap");
+        showLegend(view === "heatmap" ? "heatmap" : "vehicles");
+        this.renderCoverage(parseInt(timeSlider.value));
+    }
+
+    renderCoverage(sliderVal) {
+        if (!this.coverageData || this.mode !== "coverage") return;
+        const cutoff = this.sliderToTime(sliderVal);
+        sliderLabel.textContent = formatTimestamp(cutoff.toISOString());
+
+        if (this.coverageView === "lines") {
+            this.map.setHeatmapVisibility(false);
+            this.renderCoverageLines(sliderVal, cutoff);
+            this.map.setCoverageLineVisibility(true);
+        } else {
+            this.map.setCoverageLineVisibility(false);
+            this.renderHeatmap(sliderVal);
+            this.map.setHeatmapVisibility(true);
+        }
+    }
+
+    renderCoverageLines(sliderVal, cutoff) {
+        const sinceMs = this.coverageSince.getTime();
+        const rangeMs = cutoff.getTime() - sinceMs;
+
+        const segmentFeatures = [];
+        for (const feature of this.coverageData.features) {
+            const coords = feature.geometry.coordinates;
+            const timestamps = feature.properties.timestamps;
+            const color = vehicleColor(feature.properties.vehicle_type);
+
+            for (let i = 0; i < coords.length - 1; i++) {
+                const tMs = new Date(timestamps[i]).getTime();
+                const tNextMs = new Date(timestamps[i + 1]).getTime();
+                if (tNextMs > cutoff.getTime()) break;
+
+                const progress = rangeMs > 0 ? (tMs - sinceMs) / rangeMs : 1;
+                const opacity = 0.15 + progress * 0.65;
+
+                segmentFeatures.push({
+                    type: "Feature",
+                    geometry: {
+                        type: "LineString",
+                        coordinates: [coords[i], coords[i + 1]],
+                    },
+                    properties: { seg_opacity: opacity, seg_color: color },
+                });
+            }
+        }
+
+        const data = { type: "FeatureCollection", features: segmentFeatures };
+        this.map.renderCoverageLines(data);
+    }
+
+    renderHeatmap(sliderVal) {
+        if (!this.coverageData) return;
+        const cutoff = this.sliderToTime(sliderVal);
+
+        const pointFeatures = [];
+        for (const feature of this.coverageData.features) {
+            const coords = feature.geometry.coordinates;
+            const timestamps = feature.properties.timestamps;
+            for (let i = 0; i < coords.length; i++) {
+                const tMs = new Date(timestamps[i]).getTime();
+                if (tMs > cutoff.getTime()) break;
+                pointFeatures.push({
+                    type: "Feature",
+                    geometry: { type: "Point", coordinates: coords[i] },
+                    properties: {},
+                });
+            }
+        }
+
+        const data = { type: "FeatureCollection", features: pointFeatures };
+        this.map.renderHeatmap(data);
+    }
+
+    sliderToTime(val) {
+        const range = this.coverageUntil.getTime() - this.coverageSince.getTime();
+        return new Date(this.coverageSince.getTime() + (val / 1000) * range);
+    }
+
+    updateRangeLabel() {
+        if (this.coverageSince && this.coverageUntil) {
+            coverageRangeLabel.textContent =
+                formatRangeDate(this.coverageSince) +
+                " \u2192 " +
+                formatRangeDate(this.coverageUntil);
+        }
+    }
+
+    /* ── Auto-refresh ──────────────────────────────── */
+
+    startAutoRefresh() {
+        if (this.refreshInterval) return;
+        this.refreshInterval = setInterval(async () => {
+            if (this.mode !== "realtime") return;
+            try {
+                const rawData = await fetchVehicles();
+                const freshData = filterRecentFeatures(rawData);
+                this.map.updateVehicles(freshData);
+                updateVehicleCount(freshData);
+                this.updateDetailFromData(freshData);
+                this.refreshTrail();
+            } catch (err) {
+                console.error("Failed to refresh vehicles:", err);
+            }
+        }, 6000);
+    }
+
+    stopAutoRefresh() {
+        if (this.refreshInterval) {
+            clearInterval(this.refreshInterval);
+            this.refreshInterval = null;
+        }
+    }
+
+    /* ── Vehicle detail ────────────────────────────── */
+
+    showDetail(p) {
+        detailName.textContent = p.description;
+        detailType.textContent = p.vehicle_type;
+        detailSpeed.textContent = "Speed: " + p.speed + " km/h";
+        detailBearing.textContent = "Bearing: " + p.bearing + "\u00B0";
+        detailUpdated.textContent = "Updated: " + formatTimestamp(p.timestamp);
+        detailPanel.style.display = "block";
+    }
+
+    closeDetail() {
+        detailPanel.style.display = "none";
+        this.activeVehicleId = null;
+        this.activeVehicleTimestamp = null;
+        this.map.clearTrail();
+    }
+
+    updateDetailFromData(data) {
+        if (!this.activeVehicleId) return;
+        const feature = data.features.find(
+            (f) => f.properties.vehicle_id === this.activeVehicleId,
+        );
+        if (!feature) {
+            this.closeDetail();
+            return;
+        }
+        this.activeVehicleTimestamp = feature.properties.timestamp;
+        this.showDetail(feature.properties);
+    }
+
+    async showTrail(vehicleId, vehicleTimestamp) {
+        const data = await fetchTrail(vehicleId, vehicleTimestamp);
+        if (!data.features || data.features.length === 0) return;
+
+        const features = addTrailOpacity(data.features);
+        const trailData = { type: "FeatureCollection", features };
+        const lineData = {
+            type: "FeatureCollection",
+            features: buildTrailSegments(features),
+        };
+
+        this.map.showTrail(trailData, lineData);
+    }
+
+    async refreshTrail() {
+        if (!this.activeVehicleId) return;
+        const data = await fetchTrail(this.activeVehicleId, this.activeVehicleTimestamp);
+        if (!data.features || data.features.length === 0) return;
+
+        const features = addTrailOpacity(data.features);
+
+        this.map.updateTrail(
+            { type: "FeatureCollection", features },
+            { type: "FeatureCollection", features: buildTrailSegments(features) },
+        );
+    }
 }
 
-/* ── Coverage: rendering ───────────────────────────── */
+/* ── App init & event wiring ───────────────────────── */
 
-function sliderToTime(val) {
-    const range = coverageUntil.getTime() - coverageSince.getTime();
-    return new Date(coverageSince.getTime() + (val / 1000) * range);
-}
+const app = new PlowApp(plowMap);
 
-timeSlider.addEventListener("input", (e) => {
-    renderCoverage(parseInt(e.target.value));
+// Mode
+btnRealtime.addEventListener("click", () => app.switchMode("realtime"));
+btnCoverage.addEventListener("click", () => app.switchMode("coverage"));
+
+// Coverage presets
+timeRangePresets.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    const value = btn.dataset.hours;
+    gtag("event", "coverage_preset", { preset: value });
+    app.coveragePreset = value;
+    setPresetActive(value);
+    if (value === "date") {
+        if (coverageDateInput.value) await app.loadCoverageForDate(coverageDateInput.value);
+        return;
+    }
+    const hours = parseInt(value);
+    const now = new Date();
+    await app.loadCoverageForRange(
+        new Date(now.getTime() - hours * 60 * 60 * 1000),
+        now,
+    );
 });
 
-function renderCoverage(sliderVal) {
-    if (!coverageData || currentMode !== "coverage") return;
-    const cutoff = sliderToTime(sliderVal);
-    sliderLabel.textContent = formatTimestamp(cutoff.toISOString());
-
-    if (coverageView === "lines") {
-        plowMap.setHeatmapVisibility(false);
-        renderCoverageLines(sliderVal, cutoff);
-        plowMap.setCoverageLineVisibility(true);
-    } else {
-        plowMap.setCoverageLineVisibility(false);
-        renderHeatmap(sliderVal);
-        plowMap.setHeatmapVisibility(true);
+coverageDateInput.addEventListener("change", async () => {
+    if (app.coveragePreset === "date" && coverageDateInput.value) {
+        gtag("event", "coverage_date_pick", { date: coverageDateInput.value });
+        await app.loadCoverageForDate(coverageDateInput.value);
     }
-}
+});
 
-function renderCoverageLines(sliderVal, cutoff) {
-    const sinceMs = coverageSince.getTime();
-    const rangeMs = cutoff.getTime() - sinceMs;
+// Coverage view
+btnLines.addEventListener("click", () => app.switchCoverageView("lines"));
+btnHeatmap.addEventListener("click", () => app.switchCoverageView("heatmap"));
 
-    const segmentFeatures = [];
-    for (const feature of coverageData.features) {
-        const coords = feature.geometry.coordinates;
-        const timestamps = feature.properties.timestamps;
-        const color = vehicleColor(feature.properties.vehicle_type);
+// Slider
+timeSlider.addEventListener("input", (e) => {
+    app.renderCoverage(parseInt(e.target.value));
+});
 
-        for (let i = 0; i < coords.length - 1; i++) {
-            const tMs = new Date(timestamps[i]).getTime();
-            const tNextMs = new Date(timestamps[i + 1]).getTime();
-            if (tNextMs > cutoff.getTime()) break;
-
-            const progress = rangeMs > 0 ? (tMs - sinceMs) / rangeMs : 1;
-            const opacity = 0.15 + progress * 0.65;
-
-            segmentFeatures.push({
-                type: "Feature",
-                geometry: {
-                    type: "LineString",
-                    coordinates: [coords[i], coords[i + 1]],
-                },
-                properties: { seg_opacity: opacity, seg_color: color },
-            });
-        }
-    }
-
-    const data = { type: "FeatureCollection", features: segmentFeatures };
-    plowMap.renderCoverageLines(data);
-}
-
-function renderHeatmap(sliderVal) {
-    if (!coverageData) return;
-    const cutoff = sliderToTime(sliderVal);
-
-    const pointFeatures = [];
-    for (const feature of coverageData.features) {
-        const coords = feature.geometry.coordinates;
-        const timestamps = feature.properties.timestamps;
-        for (let i = 0; i < coords.length; i++) {
-            const tMs = new Date(timestamps[i]).getTime();
-            if (tMs > cutoff.getTime()) break;
-            pointFeatures.push({
-                type: "Feature",
-                geometry: { type: "Point", coordinates: coords[i] },
-                properties: {},
-            });
-        }
-    }
-
-    const data = { type: "FeatureCollection", features: pointFeatures };
-    plowMap.renderHeatmap(data);
-}
-
-/* ── Mode switching ────────────────────────────────── */
-
-btnRealtime.addEventListener("click", () => switchMode("realtime"));
-btnCoverage.addEventListener("click", () => switchMode("coverage"));
-
-async function switchMode(mode) {
-    if (mode === currentMode) return;
-    gtag("event", "mode_switch", { mode });
-    currentMode = mode;
-    btnRealtime.classList.toggle("active", mode === "realtime");
-    btnCoverage.classList.toggle("active", mode === "coverage");
-    if (mode === "realtime") {
-        enterRealtime();
-    } else {
-        await enterCoverage();
-    }
-}
-
-function enterRealtime() {
-    plowMap.abortCoverage();
-    plowMap.clearCoverage();
-    coveragePanelEl.style.display = "none";
-    coverageData = null;
-    plowMap.setVehiclesVisible(true);
-    document.getElementById("vehicle-count").style.display = "";
-    document.getElementById("db-size").style.display = "";
-    showLegend("vehicles");
-    startAutoRefresh();
-}
-
-async function enterCoverage() {
-    stopAutoRefresh();
-    closeDetail();
-    coverageView = "lines";
-    btnLines.classList.add("active");
-    btnHeatmap.classList.remove("active");
-    showLegend("vehicles");
-    plowMap.setVehiclesVisible(false);
-    document.getElementById("vehicle-count").style.display = "none";
-    document.getElementById("db-size").style.display = "none";
-    coveragePanelEl.style.display = "block";
-
-    coveragePreset = "24";
-    setPresetActive("24");
-    const now = new Date();
-    await loadCoverageForRange(new Date(now.getTime() - ONE_DAY_MS), now);
-}
-
-/* ── Auto-refresh ──────────────────────────────────── */
-
-function startAutoRefresh() {
-    if (refreshInterval) return;
-    refreshInterval = setInterval(async () => {
-        if (currentMode !== "realtime") return;
-        try {
-            const rawData = await fetchVehicles();
-            const freshData = filterRecentFeatures(rawData);
-            plowMap.updateVehicles(freshData);
-            updateVehicleCount(freshData);
-            updateDetailFromData(freshData);
-            refreshTrail();
-        } catch (err) {
-            console.error("Failed to refresh vehicles:", err);
-        }
-    }, 6000);
-}
-
-function stopAutoRefresh() {
-    if (refreshInterval) {
-        clearInterval(refreshInterval);
-        refreshInterval = null;
-    }
-}
+// Detail close
+document.getElementById("detail-close").addEventListener("click", () => app.closeDetail());
 
 /* ── Map load: sources, layers, handlers ───────────── */
 
@@ -809,11 +824,11 @@ plowMap.on("load", async () => {
             vehicle_id: p.vehicle_id,
         });
 
-        activeVehicleId = p.vehicle_id;
-        activeVehicleTimestamp = p.timestamp;
-        showDetail(p);
-        await showTrail(p.vehicle_id, p.timestamp);
+        app.activeVehicleId = p.vehicle_id;
+        app.activeVehicleTimestamp = p.timestamp;
+        app.showDetail(p);
+        await app.showTrail(p.vehicle_id, p.timestamp);
     });
 
-    startAutoRefresh();
+    app.startAutoRefresh();
 });
