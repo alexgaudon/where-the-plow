@@ -4,9 +4,6 @@ import httpx
 
 from where_the_plow.config import settings
 
-# The AVL API returns epoch-millisecond timestamps that represent
-# Newfoundland Standard Time (UTC-3:30) but are encoded as if they were UTC.
-# To get the real UTC time we must add the 3:30 offset back.
 _NST_CORRECTION = timedelta(hours=3, minutes=30)
 
 
@@ -66,5 +63,48 @@ async def fetch_vehicles(client: httpx.AsyncClient) -> dict:
     resp = await client.get(
         settings.avl_api_url, params=params, headers=headers, timeout=10
     )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def parse_mt_pearl_response(data: list) -> tuple[list[dict], list[dict]]:
+    vehicles = []
+    positions = []
+    for item in data:
+        vehicle_id = str(item["VEH_ID"])
+
+        ts_str = item.get("VEH_EVENT_DATETIME", "")
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            ts = datetime.now(timezone.utc)
+
+        vehicles.append(
+            {
+                "vehicle_id": vehicle_id,
+                "description": item.get("VEH_NAME", ""),
+                "vehicle_type": item.get("LOO_DESCRIPTION", "Unknown"),
+            }
+        )
+
+        positions.append(
+            {
+                "vehicle_id": vehicle_id,
+                "timestamp": ts,
+                "longitude": item.get("VEH_EVENT_LONGITUDE", 0.0),
+                "latitude": item.get("VEH_EVENT_LATITUDE", 0.0),
+                "bearing": int(item.get("VEH_EVENT_HEADING", 0)),
+                "speed": None,
+                "is_driving": "maybe",
+            }
+        )
+
+    return vehicles, positions
+
+
+async def fetch_mt_pearl_vehicles(client: httpx.AsyncClient) -> list:
+    resp = await client.get(settings.mt_pearl_api_url, timeout=10)
     resp.raise_for_status()
     return resp.json()

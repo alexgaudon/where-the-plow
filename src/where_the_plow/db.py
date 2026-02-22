@@ -27,7 +27,8 @@ class Database:
                 description   VARCHAR,
                 vehicle_type  VARCHAR,
                 first_seen    TIMESTAMPTZ NOT NULL,
-                last_seen     TIMESTAMPTZ NOT NULL
+                last_seen     TIMESTAMPTZ NOT NULL,
+                city          VARCHAR NOT NULL DEFAULT 'st_johns'
             )
         """)
         cur.execute("""
@@ -45,7 +46,8 @@ class Database:
                 bearing       INTEGER,
                 speed         DOUBLE,
                 is_driving    VARCHAR,
-                PRIMARY KEY (vehicle_id, timestamp)
+                city          VARCHAR NOT NULL DEFAULT 'st_johns',
+                PRIMARY KEY (vehicle_id, timestamp, city)
             )
         """)
         cur.execute("""
@@ -124,25 +126,52 @@ class Database:
         if su_cols:  # table exists from a prior run
             if "ip" not in su_cols:
                 cur.execute("ALTER TABLE signups ADD COLUMN ip VARCHAR")
-            if "user_agent" not in su_cols:
-                cur.execute("ALTER TABLE signups ADD COLUMN user_agent VARCHAR")
+        if "user_agent" not in su_cols:
+            cur.execute("ALTER TABLE signups ADD COLUMN user_agent VARCHAR")
 
-    def upsert_vehicles(self, vehicles: list[dict], now: datetime):
+        veh_cols = {
+            r[0]
+            for r in cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='vehicles'"
+            ).fetchall()
+        }
+        if "city" not in veh_cols:
+            cur.execute(
+                "ALTER TABLE vehicles ADD COLUMN city VARCHAR NOT NULL DEFAULT 'st_johns'"
+            )
+
+        pos_cols = {
+            r[0]
+            for r in cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='positions'"
+            ).fetchall()
+        }
+        if "city" not in pos_cols:
+            cur.execute(
+                "ALTER TABLE positions ADD COLUMN city VARCHAR NOT NULL DEFAULT 'st_johns'"
+            )
+
+    def upsert_vehicles(self, vehicles: list[dict], now: datetime, city: str):
         cur = self._cursor()
         for v in vehicles:
             cur.execute(
                 """
-                INSERT INTO vehicles (vehicle_id, description, vehicle_type, first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vehicles (vehicle_id, description, vehicle_type, first_seen, last_seen, city)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (vehicle_id) DO UPDATE SET
                     description = EXCLUDED.description,
                     vehicle_type = EXCLUDED.vehicle_type,
-                    last_seen = EXCLUDED.last_seen
+                    last_seen = EXCLUDED.last_seen,
+                    city = EXCLUDED.city
             """,
-                [v["vehicle_id"], v["description"], v["vehicle_type"], now, now],
+                [v["vehicle_id"], v["description"], v["vehicle_type"], now, now, city],
             )
 
-    def insert_positions(self, positions: list[dict], collected_at: datetime) -> int:
+    def insert_positions(
+        self, positions: list[dict], collected_at: datetime, city: str
+    ) -> int:
         if not positions:
             return 0
         cur = self._cursor()
@@ -151,8 +180,8 @@ class Database:
             cur.execute(
                 """
                 INSERT OR IGNORE INTO positions
-                    (vehicle_id, timestamp, collected_at, longitude, latitude, geom, bearing, speed, is_driving)
-                VALUES (?, ?, ?, ?, ?, ST_Point(?, ?), ?, ?, ?)
+                    (vehicle_id, timestamp, collected_at, longitude, latitude, geom, bearing, speed, is_driving, city)
+                VALUES (?, ?, ?, ?, ?, ST_Point(?, ?), ?, ?, ?, ?)
             """,
                 [
                     p["vehicle_id"],
@@ -165,37 +194,43 @@ class Database:
                     p["bearing"],
                     p["speed"],
                     p["is_driving"],
+                    city,
                 ],
             )
         count_after = cur.execute("SELECT count(*) FROM positions").fetchone()[0]
         return count_after - count_before
 
     def get_latest_positions(
-        self, limit: int = 200, after: datetime | None = None
+        self, limit: int = 200, after: datetime | None = None, city: str | None = None
     ) -> list[dict]:
         """Get the latest position for each vehicle."""
-        query = """
+        city_filter = "AND city = $3" if city else ""
+        query = f"""
             WITH ranked AS (
                 SELECT p.vehicle_id, p.timestamp, p.longitude, p.latitude,
                        p.bearing, p.speed, p.is_driving,
-                       v.description, v.vehicle_type,
+                       v.description, v.vehicle_type, v.city,
                        ROW_NUMBER() OVER (PARTITION BY p.vehicle_id ORDER BY p.timestamp DESC) as rn
                 FROM positions p
                 JOIN vehicles v ON p.vehicle_id = v.vehicle_id
             )
             SELECT vehicle_id, timestamp, longitude, latitude, bearing, speed,
-                   is_driving, description, vehicle_type
+                   is_driving, description, vehicle_type, city
             FROM ranked
             WHERE rn = 1
             AND ($1 IS NULL OR timestamp > $1)
+            {city_filter}
             ORDER BY timestamp ASC
             LIMIT $2
         """
-        rows = self._cursor().execute(query, [after, limit]).fetchall()
+        params = [after, limit]
+        if city:
+            params.append(city)
+        rows = self._cursor().execute(query, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def get_latest_positions_with_trails(
-        self, trail_points: int = 6, max_gap_s: int = 120
+        self, trail_points: int = 6, max_gap_s: int = 120, city: str | None = None
     ) -> list[dict]:
         """Get the latest position for each vehicle plus a mini-trail of recent coords.
 
@@ -203,30 +238,30 @@ class Database:
         discontinuity — the trail is truncated to only the contiguous segment
         ending at the most recent position.
         """
-        query = """
+        city_filter = "AND city = $2" if city else ""
+        query = f"""
             WITH ranked AS (
                 SELECT p.vehicle_id, p.timestamp, p.longitude, p.latitude,
                        p.bearing, p.speed, p.is_driving,
-                       v.description, v.vehicle_type,
+                       v.description, v.vehicle_type, v.city,
                        ROW_NUMBER() OVER (PARTITION BY p.vehicle_id ORDER BY p.timestamp DESC) as rn
                 FROM positions p
                 JOIN vehicles v ON p.vehicle_id = v.vehicle_id
             )
             SELECT vehicle_id, timestamp, longitude, latitude, bearing, speed,
-                   is_driving, description, vehicle_type
+                   is_driving, description, vehicle_type, city
             FROM ranked
             WHERE rn <= $1
+            {city_filter}
             ORDER BY vehicle_id, timestamp ASC
         """
-        rows = self._cursor().execute(query, [trail_points]).fetchall()
+        params = [trail_points, city] if city else [trail_points]
+        rows = self._cursor().execute(query, params).fetchall()
         all_dicts = [self._row_to_dict(r) for r in rows]
 
-        # Group by vehicle_id: last row is current position, all rows form trail.
-        # Walk backwards to find the contiguous segment (no gap > max_gap_s).
         results = []
         for _, group in groupby(all_dicts, key=lambda r: r["vehicle_id"]):
             points = list(group)
-            # Find the start of the contiguous segment ending at the latest point
             start = len(points) - 1
             for i in range(len(points) - 1, 0, -1):
                 gap = (
@@ -236,7 +271,7 @@ class Database:
                     break
                 start = i - 1
             contiguous = points[start:]
-            current = contiguous[-1]  # most recent
+            current = contiguous[-1]
             current["trail"] = [[p["longitude"], p["latitude"]] for p in contiguous]
             results.append(current)
         return results
@@ -248,32 +283,36 @@ class Database:
         radius_m: float,
         limit: int = 200,
         after: datetime | None = None,
+        city: str | None = None,
     ) -> list[dict]:
         """Get latest vehicle positions within radius_m meters of (lat, lng)."""
         radius_deg = radius_m / 111320.0
-        query = """
+        city_filter = "AND city = $5" if city else ""
+        query = f"""
             WITH ranked AS (
                 SELECT p.vehicle_id, p.timestamp, p.longitude, p.latitude,
                        p.bearing, p.speed, p.is_driving, p.geom,
-                       v.description, v.vehicle_type,
+                       v.description, v.vehicle_type, v.city,
                        ROW_NUMBER() OVER (PARTITION BY p.vehicle_id ORDER BY p.timestamp DESC) as rn
                 FROM positions p
                 JOIN vehicles v ON p.vehicle_id = v.vehicle_id
             )
             SELECT vehicle_id, timestamp, longitude, latitude, bearing, speed,
-                   is_driving, description, vehicle_type
+                   is_driving, description, vehicle_type, city
             FROM ranked
             WHERE rn = 1
             AND ST_DWithin(geom, ST_Point($1, $2), $3)
             AND ($4 IS NULL OR timestamp > $4)
+            {city_filter}
             ORDER BY timestamp ASC
-            LIMIT $5
+            LIMIT $6
         """
-        rows = (
-            self._cursor()
-            .execute(query, [lng, lat, radius_deg, after, limit])
-            .fetchall()
+        params = (
+            [lng, lat, radius_deg, after, city, limit]
+            if city
+            else [lng, lat, radius_deg, after, limit]
         )
+        rows = self._cursor().execute(query, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def get_vehicle_history(
@@ -283,26 +322,30 @@ class Database:
         until: datetime,
         limit: int = 200,
         after: datetime | None = None,
+        city: str | None = None,
     ) -> list[dict]:
         """Get position history for a single vehicle in a time range."""
-        query = """
+        city_filter = "AND v.city = $5" if city else ""
+        query = f"""
             SELECT p.vehicle_id, p.timestamp, p.longitude, p.latitude,
                    p.bearing, p.speed, p.is_driving,
-                   v.description, v.vehicle_type
+                   v.description, v.vehicle_type, v.city
             FROM positions p
             JOIN vehicles v ON p.vehicle_id = v.vehicle_id
             WHERE p.vehicle_id = $1
             AND p.timestamp >= $2
             AND p.timestamp <= $3
             AND ($4 IS NULL OR p.timestamp > $4)
+            {city_filter}
             ORDER BY p.timestamp ASC
-            LIMIT $5
+            LIMIT $6
         """
-        rows = (
-            self._cursor()
-            .execute(query, [vehicle_id, since, until, after, limit])
-            .fetchall()
+        params = (
+            [vehicle_id, since, until, after, city, limit]
+            if city
+            else [vehicle_id, since, until, after, limit]
         )
+        rows = self._cursor().execute(query, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def get_coverage(
@@ -311,27 +354,34 @@ class Database:
         until: datetime,
         limit: int = 200,
         after: datetime | None = None,
+        city: str | None = None,
     ) -> list[dict]:
         """Get all positions in a time range."""
-        query = """
+        city_filter = "AND v.city = $4" if city else ""
+        query = f"""
             SELECT p.vehicle_id, p.timestamp, p.longitude, p.latitude,
                    p.bearing, p.speed, p.is_driving,
-                   v.description, v.vehicle_type
+                   v.description, v.vehicle_type, v.city
             FROM positions p
             JOIN vehicles v ON p.vehicle_id = v.vehicle_id
             WHERE p.timestamp >= $1
             AND p.timestamp <= $2
             AND ($3 IS NULL OR p.timestamp > $3)
+            {city_filter}
             ORDER BY p.timestamp ASC
-            LIMIT $4
+            LIMIT $5
         """
-        rows = self._cursor().execute(query, [since, until, after, limit]).fetchall()
+        params = (
+            [since, until, after, city, limit] if city else [since, until, after, limit]
+        )
+        rows = self._cursor().execute(query, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def get_coverage_trails(
         self,
         since: datetime,
         until: datetime,
+        city: str | None = None,
     ) -> list[dict]:
         """Get per-vehicle LineString trails in a time range.
 
@@ -339,7 +389,8 @@ class Database:
         time_bucket downsampling (~1 point per 30s) to minimise
         the number of rows transferred to Python.
         """
-        query = """
+        city_filter = "AND v.city = $3" if city else ""
+        query = f"""
             WITH with_gap AS (
                 SELECT
                     p.vehicle_id,
@@ -355,6 +406,7 @@ class Database:
                 JOIN vehicles v ON p.vehicle_id = v.vehicle_id
                 WHERE p.timestamp >= $1
                 AND p.timestamp <= $2
+                {city_filter}
             ),
             with_segment AS (
                 SELECT *,
@@ -377,7 +429,8 @@ class Database:
             WHERE bucket_rn = 1
             ORDER BY vehicle_id, segment_id, timestamp
         """
-        rows = self._cursor().execute(query, [since, until]).fetchall()
+        params = [since, until, city] if city else [since, until]
+        rows = self._cursor().execute(query, params).fetchall()
 
         trails = []
         for (vid, seg_id), group in groupby(rows, key=lambda r: (r[0], r[1])):
@@ -410,6 +463,7 @@ class Database:
             "is_driving": row[6],
             "description": row[7],
             "vehicle_type": row[8],
+            "city": row[9] if len(row) > 9 else "st_johns",
         }
 
     def get_stats(self) -> dict:

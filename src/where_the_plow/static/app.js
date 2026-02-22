@@ -1,3 +1,18 @@
+/* ── City config ─────────────────────────────────────── */
+
+const CITY_CONFIGS = {
+  st_johns: {
+    center: [-52.71, 47.56],
+    zoom: 12,
+    display_name: "St. John's",
+  },
+  mt_pearl: {
+    center: [-52.81, 47.52],
+    zoom: 13,
+    display_name: "Mount Pearl",
+  },
+};
+
 /* ── Welcome modal ──────────────────────────────────── */
 
 const WELCOME_KEY = "wtp-welcome-dismissed";
@@ -251,7 +266,11 @@ class PlowMap {
           "#2563eb",
           "TA PLOW TRUCK",
           "#2563eb",
+          "Large Snow Plow_Blue",
+          "#2563eb",
           "LOADER",
+          "#ea580c",
+          "Large Loader",
           "#ea580c",
           "GRADER",
           "#16a34a",
@@ -522,8 +541,8 @@ class PlowMap {
 
 const plowMap = new PlowMap("map", {
   style: "https://tiles.openfreemap.org/styles/liberty",
-  center: [-52.71, 47.56],
-  zoom: 12,
+  center: CITY_CONFIGS.st_johns.center,
+  zoom: CITY_CONFIGS.st_johns.zoom,
 });
 
 const geolocate = new maplibregl.GeolocateControl({
@@ -586,11 +605,20 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const VEHICLE_COLORS = {
   "SA PLOW TRUCK": "#2563eb",
   "TA PLOW TRUCK": "#2563eb",
+  "Large Snow Plow_Blue": "#2563eb",
   LOADER: "#ea580c",
+  "Large Loader": "#ea580c",
   GRADER: "#16a34a",
 };
 const DEFAULT_COLOR = "#6b7280";
-const KNOWN_TYPES = ["SA PLOW TRUCK", "TA PLOW TRUCK", "LOADER", "GRADER"];
+const KNOWN_TYPES = [
+  "SA PLOW TRUCK",
+  "TA PLOW TRUCK",
+  "Large Snow Plow_Blue",
+  "LOADER",
+  "Large Loader",
+  "GRADER",
+];
 
 function vehicleColor(type) {
   return VEHICLE_COLORS[type] || DEFAULT_COLOR;
@@ -640,8 +668,9 @@ function formatBytes(bytes) {
 
 /* ── API ───────────────────────────────────────────── */
 
-async function fetchVehicles() {
-  const resp = await fetch("/vehicles");
+async function fetchVehicles(city) {
+  const url = city ? `/vehicles?city=${city}` : "/vehicles";
+  const resp = await fetch(url);
   return resp.json();
 }
 
@@ -682,7 +711,7 @@ const detailUpdated = document.getElementById("detail-updated");
 
 /* ── Vehicle trails ────────────────────────────────── */
 
-async function fetchTrail(vehicleId, vehicleTimestamp) {
+async function fetchTrail(vehicleId, vehicleTimestamp, city) {
   let until, since;
   if (vehicleTimestamp) {
     until = new Date(vehicleTimestamp);
@@ -691,8 +720,9 @@ async function fetchTrail(vehicleId, vehicleTimestamp) {
     until = new Date();
     since = new Date(until.getTime() - 10 * 60 * 1000);
   }
+  const cityParam = city ? `&city=${city}` : "";
   const resp = await fetch(
-    `/vehicles/${vehicleId}/history?since=${since.toISOString()}&until=${until.toISOString()}&limit=2000`,
+    `/vehicles/${vehicleId}/history?since=${since.toISOString()}&until=${until.toISOString()}&limit=2000${cityParam}`,
   );
   return resp.json();
 }
@@ -758,6 +788,11 @@ const btnStop = document.getElementById("btn-stop");
 const playbackSpeedSelect = document.getElementById("playback-speed");
 const playbackFollowSelect = document.getElementById("playback-follow");
 
+/* ── City toggle: DOM refs ─────────────────────────── */
+
+const btnStJohns = document.getElementById("btn-st-johns");
+const btnMtPearl = document.getElementById("btn-mt-pearl");
+
 /* ── Stateless DOM helpers ─────────────────────────── */
 
 function formatRangeDate(d) {
@@ -814,22 +849,20 @@ class PlowApp {
   constructor(plowMap) {
     this.map = plowMap;
 
-    // Mode
+    this.city = "st_johns";
+
     this.mode = "realtime";
 
-    // Realtime
     this.refreshInterval = null;
     this.activeVehicleId = null;
     this.activeVehicleTimestamp = null;
 
-    // Coverage
     this.coverageData = null;
     this.coverageSince = null;
     this.coverageUntil = null;
     this.coveragePreset = "24";
     this.coverageView = "lines";
 
-    // Playback
     this.playback = {
       playing: false,
       startVal: 0,
@@ -839,6 +872,34 @@ class PlowApp {
       startTime: null,
       animFrame: null,
     };
+  }
+
+  /* ── City switching ─────────────────────────────── */
+
+  async switchCity(city) {
+    if (city === this.city) return;
+    gtag("event", "city_switch", { city });
+    this.city = city;
+    const config = CITY_CONFIGS[city];
+    this.map.map.flyTo({ center: config.center, zoom: config.zoom, duration: 1000 });
+    btnStJohns.classList.toggle("active", city === "st_johns");
+    btnMtPearl.classList.toggle("active", city === "mt_pearl");
+
+    if (this.mode === "realtime") {
+      await this.refreshVehicles();
+    } else {
+      await this.loadCoverageForRange(this.coverageSince, this.coverageUntil);
+    }
+  }
+
+  async refreshVehicles() {
+    const rawData = await fetchVehicles(this.city);
+    const freshData = filterRecentFeatures(rawData);
+    this.map.updateVehicles(freshData);
+    this.map.updateMiniTrails(buildMiniTrails(freshData));
+    updateVehicleCount(freshData);
+    this.updateDetailFromData(freshData);
+    await this.refreshTrail();
   }
 
   /* ── Type filtering ─────────────────────────────── */
@@ -1128,8 +1189,9 @@ class PlowApp {
     timeSliderEl.noUiSlider.set([0, 1000]);
     this.map.clearCoverage();
     try {
+      const cityParam = this.city ? `&city=${this.city}` : "";
       const resp = await fetch(
-        `/coverage?since=${since.toISOString()}&until=${until.toISOString()}`,
+        `/coverage?since=${since.toISOString()}&until=${until.toISOString()}${cityParam}`,
         { signal },
       );
       this.coverageData = await resp.json();
@@ -1269,13 +1331,7 @@ class PlowApp {
     this.refreshInterval = setInterval(async () => {
       if (this.mode !== "realtime") return;
       try {
-        const rawData = await fetchVehicles();
-        const freshData = filterRecentFeatures(rawData);
-        this.map.updateVehicles(freshData);
-        this.map.updateMiniTrails(buildMiniTrails(freshData));
-        updateVehicleCount(freshData);
-        this.updateDetailFromData(freshData);
-        this.refreshTrail();
+        await this.refreshVehicles();
       } catch (err) {
         console.error("Failed to refresh vehicles:", err);
       }
@@ -1294,7 +1350,12 @@ class PlowApp {
   showDetail(p) {
     detailName.textContent = p.description;
     detailType.textContent = p.vehicle_type;
-    detailSpeed.textContent = "Speed: " + p.speed + " km/h";
+    if (p.speed != null && p.speed > 0) {
+      detailSpeed.textContent = "Speed: " + p.speed + " km/h";
+      detailSpeed.style.display = "";
+    } else {
+      detailSpeed.style.display = "none";
+    }
     detailBearing.textContent = "Bearing: " + p.bearing + "\u00B0";
     detailUpdated.textContent = "Updated: " + formatTimestamp(p.timestamp);
     vehicleHint.style.display = "none";
@@ -1323,7 +1384,7 @@ class PlowApp {
   }
 
   async showTrail(vehicleId, vehicleTimestamp) {
-    const data = await fetchTrail(vehicleId, vehicleTimestamp);
+    const data = await fetchTrail(vehicleId, vehicleTimestamp, this.city);
     if (!data.features || data.features.length === 0) return;
 
     const features = addTrailOpacity(data.features);
@@ -1342,6 +1403,7 @@ class PlowApp {
     const data = await fetchTrail(
       this.activeVehicleId,
       this.activeVehicleTimestamp,
+      this.city,
     );
     if (!data.features || data.features.length === 0) return;
 
@@ -1361,6 +1423,10 @@ const app = new PlowApp(plowMap);
 // Mode
 btnRealtime.addEventListener("click", () => app.switchMode("realtime"));
 btnCoverage.addEventListener("click", () => app.switchMode("coverage"));
+
+// City
+btnStJohns.addEventListener("click", () => app.switchCity("st_johns"));
+btnMtPearl.addEventListener("click", () => app.switchCity("mt_pearl"));
 
 // Coverage presets
 timeRangePresets.addEventListener("click", async (e) => {
@@ -1421,7 +1487,7 @@ document
 /* ── Map load: sources, layers, handlers ───────────── */
 
 plowMap.on("load", async () => {
-  const rawData = await fetchVehicles();
+  const rawData = await fetchVehicles(app.city);
   const data = filterRecentFeatures(rawData);
   updateVehicleCount(data);
 

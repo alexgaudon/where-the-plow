@@ -51,6 +51,7 @@ def test_client():
                         },
                     ],
                     now,
+                    "st_johns",
                 )
                 db.insert_positions(
                     [
@@ -74,6 +75,7 @@ def test_client():
                         },
                     ],
                     now,
+                    "st_johns",
                 )
                 # Additional positions for v1 to enable coverage trail testing
                 from datetime import timedelta
@@ -102,6 +104,7 @@ def test_client():
                         },
                     ],
                     now,
+                    "st_johns",
                 )
                 yield client
 

@@ -54,11 +54,22 @@ from where_the_plow.models import (
     StatsResponse,
     ViewportTrack,
 )
+from where_the_plow.config import CITY_CONFIGS
 
 router = APIRouter()
 
 DEFAULT_LIMIT = 200
 MAX_LIMIT = 2000
+
+
+@router.get(
+    "/cities",
+    summary="Available cities",
+    description="Returns the list of supported cities with their map configurations.",
+    tags=["cities"],
+)
+def get_cities():
+    return CITY_CONFIGS
 
 
 def _rows_to_feature_collection(rows: list[dict], limit: int) -> FeatureCollection:
@@ -80,6 +91,8 @@ def _rows_to_feature_collection(rows: list[dict], limit: int) -> FeatureCollecti
                     bearing=r["bearing"],
                     is_driving=r["is_driving"],
                     timestamp=ts_str,
+                    city=r.get("city", "st_johns"),
+                    trail=None,
                 ),
             )
         )
@@ -114,14 +127,24 @@ def get_vehicles(
     after: datetime | None = Query(
         None, description="Cursor: return features after this timestamp (ISO 8601)"
     ),
+    city: str | None = Query(
+        None, description="Filter by city: 'st_johns' or 'mt_pearl'"
+    ),
 ):
-    # Return cached realtime snapshot if available and no pagination cursor
     store = getattr(request.app.state, "store", {})
     if after is None and "realtime" in store:
-        return JSONResponse(content=store["realtime"])
+        if city and city in store["realtime"]:
+            return JSONResponse(content=store["realtime"][city])
+        elif city is None:
+            combined = {"type": "FeatureCollection", "features": []}
+            for c in ["st_johns", "mt_pearl"]:
+                if c in store["realtime"]:
+                    combined["features"].extend(store["realtime"][c]["features"])
+            return JSONResponse(content=combined)
+        return JSONResponse(content={"type": "FeatureCollection", "features": []})
 
     db = request.app.state.db
-    rows = db.get_latest_positions(limit=limit, after=after)
+    rows = db.get_latest_positions(limit=limit, after=after, city=city)
     return _rows_to_feature_collection(rows, limit)
 
 
@@ -144,10 +167,13 @@ def get_vehicles_nearby(
     after: datetime | None = Query(
         None, description="Cursor: return features after this timestamp (ISO 8601)"
     ),
+    city: str | None = Query(
+        None, description="Filter by city: 'st_johns' or 'mt_pearl'"
+    ),
 ):
     db = request.app.state.db
     rows = db.get_nearby_vehicles(
-        lat=lat, lng=lng, radius_m=radius, limit=limit, after=after
+        lat=lat, lng=lng, radius_m=radius, limit=limit, after=after, city=city
     )
     return _rows_to_feature_collection(rows, limit)
 
@@ -175,6 +201,9 @@ def get_vehicle_history(
     after: datetime | None = Query(
         None, description="Cursor: return features after this timestamp (ISO 8601)"
     ),
+    city: str | None = Query(
+        None, description="Filter by city: 'st_johns' or 'mt_pearl'"
+    ),
 ):
     db = request.app.state.db
     now = datetime.now(timezone.utc)
@@ -183,7 +212,7 @@ def get_vehicle_history(
     if until is None:
         until = now
     rows = db.get_vehicle_history(
-        vehicle_id, since=since, until=until, limit=limit, after=after
+        vehicle_id, since=since, until=until, limit=limit, after=after, city=city
     )
     return _rows_to_feature_collection(rows, limit)
 
@@ -205,6 +234,9 @@ def get_coverage(
     until: datetime | None = Query(
         None, description="End of time range (ISO 8601). Default: now."
     ),
+    city: str | None = Query(
+        None, description="Filter by city: 'st_johns' or 'mt_pearl'"
+    ),
 ):
     db = request.app.state.db
     now = datetime.now(timezone.utc)
@@ -213,12 +245,11 @@ def get_coverage(
     if until is None:
         until = now
 
-    # Check file cache (only hits for fully-historical queries)
     cached = cache.get(since, until)
     if cached is not None:
         trails = cached
     else:
-        trails = db.get_coverage_trails(since=since, until=until)
+        trails = db.get_coverage_trails(since=since, until=until, city=city)
         cache.put(since, until, trails)
 
     features = [
@@ -229,6 +260,7 @@ def get_coverage(
                 vehicle_type=t["vehicle_type"],
                 description=t["description"],
                 timestamps=t["timestamps"],
+                city=t.get("city", "st_johns"),
             ),
         )
         for t in trails

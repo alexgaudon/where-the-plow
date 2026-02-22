@@ -3,7 +3,7 @@ import os
 import tempfile
 
 from where_the_plow.db import Database
-from where_the_plow.collector import process_poll
+from where_the_plow.collector import process_poll_st_johns
 
 
 SAMPLE_RESPONSE = {
@@ -36,15 +36,13 @@ def make_db():
 def test_process_poll_inserts_data():
     db, path = make_db()
 
-    inserted = process_poll(db, SAMPLE_RESPONSE)
+    inserted = process_poll_st_johns(db, SAMPLE_RESPONSE)
     assert inserted == 1
 
-    # Verify vehicle was upserted
     row = db.conn.execute("SELECT * FROM vehicles WHERE vehicle_id='v1'").fetchone()
     assert row is not None
     assert row[1] == "2222 SA PLOW TRUCK"
 
-    # Verify position was inserted
     row = db.conn.execute("SELECT * FROM positions WHERE vehicle_id='v1'").fetchone()
     assert row is not None
 
@@ -55,8 +53,8 @@ def test_process_poll_inserts_data():
 def test_process_poll_deduplicates():
     db, path = make_db()
 
-    inserted1 = process_poll(db, SAMPLE_RESPONSE)
-    inserted2 = process_poll(db, SAMPLE_RESPONSE)
+    inserted1 = process_poll_st_johns(db, SAMPLE_RESPONSE)
+    inserted2 = process_poll_st_johns(db, SAMPLE_RESPONSE)
     assert inserted1 == 1
     assert inserted2 == 0
 

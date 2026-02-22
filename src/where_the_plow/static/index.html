@@ -3,22 +3,22 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>where the plow - St. John's Snowplow Tracker</title>
+        <title>where the plow - St. John's & Mount Pearl Snowplow Tracker</title>
         <meta
             name="description"
-            content="Real-time and historical snowplow tracker for St. John's, Newfoundland. See which streets have been plowed, track vehicles live, and explore coverage history."
+            content="Real-time and historical snowplow tracker for St. John's and Mount Pearl, Newfoundland. See which streets have been plowed, track vehicles live, and explore coverage history."
         />
         <meta
             name="keywords"
-            content="snowplow, plow tracker, St. John's, Newfoundland, NL, snow clearing, winter, realtime, city services"
+            content="snowplow, plow tracker, St. John's, Mount Pearl, Newfoundland, NL, snow clearing, winter, realtime, city services"
         />
         <meta name="author" content="Jack Harrhy" />
         <meta name="theme-color" content="#0f172a" />
         <link rel="canonical" href="https://plow.jackharrhy.dev" />
-        <meta property="og:title" content="where the plow - St. John's Snowplow Tracker" />
+        <meta property="og:title" content="where the plow - St. John's & Mount Pearl Snowplow Tracker" />
         <meta
             property="og:description"
-            content="Real-time and historical snowplow tracker for St. John's, Newfoundland. See which streets have been plowed, track vehicles live, and explore coverage history."
+            content="Real-time and historical snowplow tracker for St. John's and Mount Pearl, Newfoundland. See which streets have been plowed, track vehicles live, and explore coverage history."
         />
         <meta
             property="og:image"
@@ -30,10 +30,10 @@
         <meta property="og:site_name" content="where the plow" />
         <meta property="og:locale" content="en_CA" />
         <meta name="twitter:card" content="summary_large_image" />
-        <meta name="twitter:title" content="where the plow - St. John's Snowplow Tracker" />
+        <meta name="twitter:title" content="where the plow - St. John's & Mount Pearl Snowplow Tracker" />
         <meta
             name="twitter:description"
-            content="Real-time and historical snowplow tracker for St. John's, Newfoundland. See which streets have been plowed, track vehicles live, and explore coverage history."
+            content="Real-time and historical snowplow tracker for St. John's and Mount Pearl, Newfoundland. See which streets have been plowed, track vehicles live, and explore coverage history."
         />
         <meta
             name="twitter:image"
@@ -77,6 +77,10 @@
         <button id="panel-toggle" title="Toggle info panel">&#9776;</button>
         <div id="info-panel">
             <h3>where the plow</h3>
+            <div id="city-toggle" class="toggle-group">
+                <button id="btn-st-johns" class="active">St. John's</button>
+                <button id="btn-mt-pearl">Mount Pearl</button>
+            </div>
             <div id="mode-toggle" class="toggle-group">
                 <button id="btn-realtime" class="active">Realtime</button>
                 <button id="btn-coverage">Coverage</button>
@@ -154,7 +158,7 @@
                     <div id="legend-vehicles">
                         <label
                             class="legend-row"
-                            data-types="SA PLOW TRUCK,TA PLOW TRUCK"
+                            data-types="SA PLOW TRUCK,TA PLOW TRUCK,Large Snow Plow_Blue"
                         >
                             <span
                                 class="legend-swatch"
@@ -167,7 +171,7 @@
                                 class="legend-check"
                             />
                         </label>
-                        <label class="legend-row" data-types="LOADER">
+                        <label class="legend-row" data-types="LOADER,Large Loader">
                             <span
                                 class="legend-swatch"
                                 style="background: #ea580c"
@@ -219,6 +223,13 @@
                     target="_blank"
                     rel="noopener"
                     >City of St. John's AVL</a
+                >
+                &amp;
+                <a
+                    href="https://gps5.aatracking.com/api/MtPearlPortal/GetPlows"
+                    target="_blank"
+                    rel="noopener"
+                    >City of Mount Pearl</a
                 ><br />
                 <a
                     href="https://github.com/jackharrhy/where-the-plow"
@@ -239,7 +250,7 @@
                 <h2>where the plow</h2>
                 <p>
                     Snowplow activity in
-                    <strong>St. John's, Newfoundland</strong>. See which streets
+                    <strong>St. John's &amp; Mount Pearl, Newfoundland</strong>. See which streets
                     have been plowed, track individual vehicles in realtime, and
                     explore historical coverage.
                 </p>
@@ -253,7 +264,14 @@
                             rel="noopener"
                             >City of St. John's AVL</a
                         >
-                        system and stored for historical playback.
+                        and
+                        <a
+                            href="https://gps5.aatracking.com/api/MtPearlPortal/GetPlows"
+                            target="_blank"
+                            rel="noopener"
+                            >City of Mount Pearl</a
+                        >
+                        systems and stored for historical playback.
                     </p>
                 </div>
                 <div class="welcome-section">
