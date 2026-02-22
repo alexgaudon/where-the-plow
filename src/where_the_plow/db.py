@@ -4,7 +4,6 @@ import os
 import duckdb
 from datetime import datetime
 from itertools import groupby
-from operator import itemgetter
 
 
 class Database:
@@ -52,6 +51,22 @@ class Database:
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_positions_time_geo
                 ON positions (timestamp, latitude, longitude)
+        """)
+        cur.execute("""
+            CREATE SEQUENCE IF NOT EXISTS viewports_seq
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS viewports (
+                id          BIGINT DEFAULT nextval('viewports_seq') PRIMARY KEY,
+                timestamp   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                zoom        DOUBLE NOT NULL,
+                center_lng  DOUBLE NOT NULL,
+                center_lat  DOUBLE NOT NULL,
+                sw_lng      DOUBLE NOT NULL,
+                sw_lat      DOUBLE NOT NULL,
+                ne_lng      DOUBLE NOT NULL,
+                ne_lat      DOUBLE NOT NULL
+            )
         """)
 
         # Migration: add geom column to existing tables that lack it
@@ -133,6 +148,53 @@ class Database:
         """
         rows = self._cursor().execute(query, [after, limit]).fetchall()
         return [self._row_to_dict(r) for r in rows]
+
+    def get_latest_positions_with_trails(
+        self, trail_points: int = 6, max_gap_s: int = 120
+    ) -> list[dict]:
+        """Get the latest position for each vehicle plus a mini-trail of recent coords.
+
+        Positions separated by more than max_gap_s seconds are treated as a
+        discontinuity — the trail is truncated to only the contiguous segment
+        ending at the most recent position.
+        """
+        query = """
+            WITH ranked AS (
+                SELECT p.vehicle_id, p.timestamp, p.longitude, p.latitude,
+                       p.bearing, p.speed, p.is_driving,
+                       v.description, v.vehicle_type,
+                       ROW_NUMBER() OVER (PARTITION BY p.vehicle_id ORDER BY p.timestamp DESC) as rn
+                FROM positions p
+                JOIN vehicles v ON p.vehicle_id = v.vehicle_id
+            )
+            SELECT vehicle_id, timestamp, longitude, latitude, bearing, speed,
+                   is_driving, description, vehicle_type
+            FROM ranked
+            WHERE rn <= $1
+            ORDER BY vehicle_id, timestamp ASC
+        """
+        rows = self._cursor().execute(query, [trail_points]).fetchall()
+        all_dicts = [self._row_to_dict(r) for r in rows]
+
+        # Group by vehicle_id: last row is current position, all rows form trail.
+        # Walk backwards to find the contiguous segment (no gap > max_gap_s).
+        results = []
+        for _, group in groupby(all_dicts, key=lambda r: r["vehicle_id"]):
+            points = list(group)
+            # Find the start of the contiguous segment ending at the latest point
+            start = len(points) - 1
+            for i in range(len(points) - 1, 0, -1):
+                gap = (
+                    points[i]["timestamp"] - points[i - 1]["timestamp"]
+                ).total_seconds()
+                if gap > max_gap_s:
+                    break
+                start = i - 1
+            contiguous = points[start:]
+            current = contiguous[-1]  # most recent
+            current["trail"] = [[p["longitude"], p["latitude"]] for p in contiguous]
+            results.append(current)
+        return results
 
     def get_nearby_vehicles(
         self,
@@ -225,72 +287,70 @@ class Database:
         self,
         since: datetime,
         until: datetime,
-        min_interval_s: float = 30.0,
-        max_gap_s: float = 120.0,
     ) -> list[dict]:
-        """Get per-vehicle LineString trails in a time range, downsampled and gap-split."""
+        """Get per-vehicle LineString trails in a time range.
+
+        Uses SQL-side gap detection (>120s breaks a segment) and
+        time_bucket downsampling (~1 point per 30s) to minimise
+        the number of rows transferred to Python.
+        """
         query = """
-            SELECT p.vehicle_id, p.timestamp, p.longitude, p.latitude,
-                   v.description, v.vehicle_type
-            FROM positions p
-            JOIN vehicles v ON p.vehicle_id = v.vehicle_id
-            WHERE p.timestamp >= $1
-            AND p.timestamp <= $2
-            ORDER BY p.vehicle_id, p.timestamp ASC
+            WITH with_gap AS (
+                SELECT
+                    p.vehicle_id,
+                    p.timestamp,
+                    p.longitude,
+                    p.latitude,
+                    v.description,
+                    v.vehicle_type,
+                    EPOCH(p.timestamp - LAG(p.timestamp) OVER (
+                        PARTITION BY p.vehicle_id ORDER BY p.timestamp
+                    )) AS gap_s
+                FROM positions p
+                JOIN vehicles v ON p.vehicle_id = v.vehicle_id
+                WHERE p.timestamp >= $1
+                AND p.timestamp <= $2
+            ),
+            with_segment AS (
+                SELECT *,
+                    SUM(CASE WHEN gap_s IS NULL OR gap_s > 120 THEN 1 ELSE 0 END)
+                        OVER (PARTITION BY vehicle_id ORDER BY timestamp) AS segment_id
+                FROM with_gap
+            ),
+            bucketed AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY vehicle_id, segment_id,
+                            time_bucket(INTERVAL '30 seconds', timestamp)
+                        ORDER BY timestamp
+                    ) AS bucket_rn
+                FROM with_segment
+            )
+            SELECT vehicle_id, segment_id, timestamp, longitude, latitude,
+                   description, vehicle_type
+            FROM bucketed
+            WHERE bucket_rn = 1
+            ORDER BY vehicle_id, segment_id, timestamp
         """
         rows = self._cursor().execute(query, [since, until]).fetchall()
 
         trails = []
-        for vid, group in groupby(rows, key=itemgetter(0)):
+        for (vid, seg_id), group in groupby(rows, key=lambda r: (r[0], r[1])):
             points = list(group)
             if len(points) < 2:
                 continue
-
-            # Downsample: keep first point, then skip until >= min_interval_s
-            sampled = [points[0]]
-            for pt in points[1:]:
-                elapsed = (pt[1] - sampled[-1][1]).total_seconds()
-                if elapsed >= min_interval_s:
-                    sampled.append(pt)
-            # Always include the last point
-            if sampled[-1] != points[-1]:
-                sampled.append(points[-1])
-
-            if len(sampled) < 2:
-                continue
-
-            # Split at gaps > max_gap_s
-            segments = []
-            current_segment = [sampled[0]]
-            for pt in sampled[1:]:
-                gap = (pt[1] - current_segment[-1][1]).total_seconds()
-                if gap > max_gap_s:
-                    if len(current_segment) >= 2:
-                        segments.append(current_segment)
-                    current_segment = [pt]
-                else:
-                    current_segment.append(pt)
-            if len(current_segment) >= 2:
-                segments.append(current_segment)
-
-            description = sampled[0][4]
-            vehicle_type = sampled[0][5]
-
-            for seg in segments:
-                trails.append(
-                    {
-                        "vehicle_id": vid,
-                        "description": description,
-                        "vehicle_type": vehicle_type,
-                        "coordinates": [[p[2], p[3]] for p in seg],
-                        "timestamps": [
-                            p[1].isoformat()
-                            if isinstance(p[1], datetime)
-                            else str(p[1])
-                            for p in seg
-                        ],
-                    }
-                )
+            trails.append(
+                {
+                    "vehicle_id": vid,
+                    "description": points[0][5],
+                    "vehicle_type": points[0][6],
+                    "coordinates": [[p[3], p[4]] for p in points],
+                    "timestamps": [
+                        p[2].isoformat() if isinstance(p[2], datetime) else str(p[2])
+                        for p in points
+                    ],
+                }
+            )
 
         return trails
 
@@ -338,6 +398,25 @@ class Database:
                 result["earliest"] = row[0]
                 result["latest"] = row[1]
         return result
+
+    def insert_viewport(
+        self,
+        zoom: float,
+        center_lng: float,
+        center_lat: float,
+        sw_lng: float,
+        sw_lat: float,
+        ne_lng: float,
+        ne_lat: float,
+    ):
+        """Record a user viewport focus event."""
+        self._cursor().execute(
+            """
+            INSERT INTO viewports (zoom, center_lng, center_lat, sw_lng, sw_lat, ne_lng, ne_lat)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [zoom, center_lng, center_lat, sw_lng, sw_lat, ne_lng, ne_lat],
+        )
 
     def close(self):
         self.conn.close()

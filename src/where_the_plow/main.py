@@ -25,9 +25,10 @@ async def lifespan(app: FastAPI):
     db = Database(settings.db_path)
     db.init()
     app.state.db = db
+    app.state.store = {}
     logger.info("Database initialized at %s", settings.db_path)
 
-    task = asyncio.create_task(collector.run(db))
+    task = asyncio.create_task(collector.run(db, app.state.store))
     yield
     task.cancel()
     try:

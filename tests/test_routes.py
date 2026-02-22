@@ -17,7 +17,7 @@ def test_client():
     with patch.dict(os.environ, {"DB_PATH": path}):
         with patch("where_the_plow.collector.run", new_callable=AsyncMock) as mock_run:
 
-            async def hang_forever(db):
+            async def hang_forever(db, store):
                 import asyncio
 
                 await asyncio.Event().wait()
@@ -182,6 +182,26 @@ def test_get_stats(test_client):
     assert data["db_size_bytes"] > 0
 
 
+def test_track_viewport(test_client):
+    resp = test_client.post(
+        "/track",
+        json={
+            "zoom": 14.5,
+            "center": [-52.73, 47.56],
+            "bounds": {
+                "sw": [-52.75, 47.55],
+                "ne": [-52.71, 47.57],
+            },
+        },
+    )
+    assert resp.status_code == 204
+
+
+def test_track_viewport_invalid(test_client):
+    resp = test_client.post("/track", json={"zoom": 14.5})
+    assert resp.status_code == 422
+
+
 def test_openapi_spec(test_client):
     resp = test_client.get("/openapi.json")
     assert resp.status_code == 200
@@ -191,3 +211,4 @@ def test_openapi_spec(test_client):
     assert "/vehicles/nearby" in paths
     assert "/coverage" in paths
     assert "/stats" in paths
+    assert "/track" in paths

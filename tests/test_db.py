@@ -23,6 +23,28 @@ def test_init_creates_tables():
     table_names = {t[0] for t in tables}
     assert "vehicles" in table_names
     assert "positions" in table_names
+    assert "viewports" in table_names
+    db.close()
+    os.unlink(path)
+
+
+def test_insert_viewport():
+    db, path = make_db()
+    db.insert_viewport(
+        zoom=14.5,
+        center_lng=-52.73,
+        center_lat=47.56,
+        sw_lng=-52.75,
+        sw_lat=47.55,
+        ne_lng=-52.71,
+        ne_lat=47.57,
+    )
+    rows = db.conn.execute("SELECT * FROM viewports").fetchall()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row[2] == 14.5  # zoom
+    assert row[3] == -52.73  # center_lng
+    assert row[4] == 47.56  # center_lat
     db.close()
     os.unlink(path)
 
@@ -547,6 +569,334 @@ def test_get_coverage_trails_downsampling():
     # Should have ~3 points, not 10
     assert len(trails[0]["coordinates"]) < 10
     assert len(trails[0]["coordinates"]) >= 2
+
+    db.close()
+    os.unlink(path)
+
+
+def test_get_latest_positions_with_trails_basic():
+    """Each vehicle gets a trail array of [lng, lat] pairs, current position is the latest."""
+    db, path = make_db()
+    now = datetime.now(timezone.utc)
+    ts1 = datetime(2026, 2, 19, 12, 0, 0, tzinfo=timezone.utc)
+    ts2 = datetime(2026, 2, 19, 12, 0, 6, tzinfo=timezone.utc)
+    ts3 = datetime(2026, 2, 19, 12, 0, 12, tzinfo=timezone.utc)
+
+    db.upsert_vehicles(
+        [{"vehicle_id": "v1", "description": "Plow 1", "vehicle_type": "LOADER"}], now
+    )
+    db.insert_positions(
+        [
+            {
+                "vehicle_id": "v1",
+                "timestamp": ts1,
+                "longitude": -52.73,
+                "latitude": 47.56,
+                "bearing": 0,
+                "speed": 5.0,
+                "is_driving": "maybe",
+            },
+            {
+                "vehicle_id": "v1",
+                "timestamp": ts2,
+                "longitude": -52.74,
+                "latitude": 47.57,
+                "bearing": 90,
+                "speed": 10.0,
+                "is_driving": "maybe",
+            },
+            {
+                "vehicle_id": "v1",
+                "timestamp": ts3,
+                "longitude": -52.75,
+                "latitude": 47.58,
+                "bearing": 180,
+                "speed": 15.0,
+                "is_driving": "maybe",
+            },
+        ],
+        now,
+    )
+
+    results = db.get_latest_positions_with_trails(trail_points=6)
+    assert len(results) == 1
+
+    v1 = results[0]
+    # Current position should be the latest
+    assert abs(v1["longitude"] - (-52.75)) < 0.001
+    assert abs(v1["latitude"] - 47.58) < 0.001
+    assert v1["bearing"] == 180
+    assert v1["speed"] == 15.0
+
+    # Trail should contain all 3 positions in chronological order
+    assert len(v1["trail"]) == 3
+    assert v1["trail"][0] == [-52.73, 47.56]
+    assert v1["trail"][1] == [-52.74, 47.57]
+    assert v1["trail"][2] == [-52.75, 47.58]
+
+    db.close()
+    os.unlink(path)
+
+
+def test_get_latest_positions_with_trails_multiple_vehicles():
+    """Multiple vehicles each get their own independent trail."""
+    db, path = make_db()
+    now = datetime.now(timezone.utc)
+    ts1 = datetime(2026, 2, 19, 12, 0, 0, tzinfo=timezone.utc)
+    ts2 = datetime(2026, 2, 19, 12, 0, 6, tzinfo=timezone.utc)
+
+    db.upsert_vehicles(
+        [
+            {"vehicle_id": "v1", "description": "Plow 1", "vehicle_type": "LOADER"},
+            {
+                "vehicle_id": "v2",
+                "description": "Plow 2",
+                "vehicle_type": "SA PLOW TRUCK",
+            },
+        ],
+        now,
+    )
+    db.insert_positions(
+        [
+            {
+                "vehicle_id": "v1",
+                "timestamp": ts1,
+                "longitude": -52.73,
+                "latitude": 47.56,
+                "bearing": 0,
+                "speed": 5.0,
+                "is_driving": "maybe",
+            },
+            {
+                "vehicle_id": "v1",
+                "timestamp": ts2,
+                "longitude": -52.74,
+                "latitude": 47.57,
+                "bearing": 90,
+                "speed": 10.0,
+                "is_driving": "maybe",
+            },
+            {
+                "vehicle_id": "v2",
+                "timestamp": ts1,
+                "longitude": -52.80,
+                "latitude": 47.50,
+                "bearing": 180,
+                "speed": 0.0,
+                "is_driving": "no",
+            },
+            {
+                "vehicle_id": "v2",
+                "timestamp": ts2,
+                "longitude": -52.81,
+                "latitude": 47.51,
+                "bearing": 270,
+                "speed": 8.0,
+                "is_driving": "maybe",
+            },
+        ],
+        now,
+    )
+
+    results = db.get_latest_positions_with_trails(trail_points=6)
+    assert len(results) == 2
+
+    v1 = next(r for r in results if r["vehicle_id"] == "v1")
+    v2 = next(r for r in results if r["vehicle_id"] == "v2")
+
+    assert len(v1["trail"]) == 2
+    assert len(v2["trail"]) == 2
+    assert v1["trail"][0] == [-52.73, 47.56]
+    assert v2["trail"][1] == [-52.81, 47.51]
+
+    # Current position fields should reflect the latest position
+    assert v1["vehicle_type"] == "LOADER"
+    assert v2["vehicle_type"] == "SA PLOW TRUCK"
+
+    db.close()
+    os.unlink(path)
+
+
+def test_get_latest_positions_with_trails_capped():
+    """Trail is capped to trail_points most recent positions."""
+    db, path = make_db()
+    now = datetime.now(timezone.utc)
+
+    db.upsert_vehicles(
+        [{"vehicle_id": "v1", "description": "Plow 1", "vehicle_type": "LOADER"}], now
+    )
+    # Insert 10 positions
+    positions = []
+    for i in range(10):
+        positions.append(
+            {
+                "vehicle_id": "v1",
+                "timestamp": datetime(2026, 2, 19, 12, 0, i * 6, tzinfo=timezone.utc),
+                "longitude": -52.73 + i * 0.01,
+                "latitude": 47.56,
+                "bearing": 0,
+                "speed": 10.0,
+                "is_driving": "maybe",
+            }
+        )
+    db.insert_positions(positions, now)
+
+    results = db.get_latest_positions_with_trails(trail_points=4)
+    assert len(results) == 1
+    v1 = results[0]
+
+    # Should only have 4 trail points (the 4 most recent)
+    assert len(v1["trail"]) == 4
+    # Current position is the last inserted (i=9)
+    assert abs(v1["longitude"] - (-52.73 + 9 * 0.01)) < 0.001
+    # Trail should start from position i=6 (10 - 4 = 6th oldest)
+    assert abs(v1["trail"][0][0] - (-52.73 + 6 * 0.01)) < 0.001
+
+    db.close()
+    os.unlink(path)
+
+
+def test_get_latest_positions_with_trails_single_position():
+    """A vehicle with only 1 position still gets a trail with 1 entry."""
+    db, path = make_db()
+    now = datetime.now(timezone.utc)
+    ts = datetime(2026, 2, 19, 12, 0, 0, tzinfo=timezone.utc)
+
+    db.upsert_vehicles(
+        [{"vehicle_id": "v1", "description": "Plow 1", "vehicle_type": "LOADER"}], now
+    )
+    db.insert_positions(
+        [
+            {
+                "vehicle_id": "v1",
+                "timestamp": ts,
+                "longitude": -52.73,
+                "latitude": 47.56,
+                "bearing": 45,
+                "speed": 0.0,
+                "is_driving": "no",
+            },
+        ],
+        now,
+    )
+
+    results = db.get_latest_positions_with_trails(trail_points=6)
+    assert len(results) == 1
+    v1 = results[0]
+    assert len(v1["trail"]) == 1
+    assert v1["trail"][0] == [-52.73, 47.56]
+    assert v1["bearing"] == 45
+
+    db.close()
+    os.unlink(path)
+
+
+def test_get_latest_positions_with_trails_gap_filtering():
+    """Gaps > 120s in the trail should truncate to only the contiguous recent segment."""
+    db, path = make_db()
+    now = datetime.now(timezone.utc)
+
+    db.upsert_vehicles(
+        [{"vehicle_id": "v1", "description": "Plow 1", "vehicle_type": "LOADER"}], now
+    )
+    # 5 positions: first two are close together, then a 5-minute gap, then three more
+    positions = [
+        {
+            "vehicle_id": "v1",
+            "timestamp": datetime(2026, 2, 19, 12, 0, 0, tzinfo=timezone.utc),
+            "longitude": -52.73,
+            "latitude": 47.56,
+            "bearing": 0,
+            "speed": 10.0,
+            "is_driving": "maybe",
+        },
+        {
+            "vehicle_id": "v1",
+            "timestamp": datetime(2026, 2, 19, 12, 0, 30, tzinfo=timezone.utc),
+            "longitude": -52.74,
+            "latitude": 47.57,
+            "bearing": 0,
+            "speed": 10.0,
+            "is_driving": "maybe",
+        },
+        # 5-minute gap here (300s > 120s threshold)
+        {
+            "vehicle_id": "v1",
+            "timestamp": datetime(2026, 2, 19, 12, 5, 30, tzinfo=timezone.utc),
+            "longitude": -52.80,
+            "latitude": 47.50,
+            "bearing": 90,
+            "speed": 15.0,
+            "is_driving": "maybe",
+        },
+        {
+            "vehicle_id": "v1",
+            "timestamp": datetime(2026, 2, 19, 12, 6, 0, tzinfo=timezone.utc),
+            "longitude": -52.81,
+            "latitude": 47.51,
+            "bearing": 90,
+            "speed": 15.0,
+            "is_driving": "maybe",
+        },
+        {
+            "vehicle_id": "v1",
+            "timestamp": datetime(2026, 2, 19, 12, 6, 30, tzinfo=timezone.utc),
+            "longitude": -52.82,
+            "latitude": 47.52,
+            "bearing": 90,
+            "speed": 15.0,
+            "is_driving": "maybe",
+        },
+    ]
+    db.insert_positions(positions, now)
+
+    results = db.get_latest_positions_with_trails(trail_points=10)
+    assert len(results) == 1
+    v1 = results[0]
+
+    # Should only have the 3 positions after the gap (contiguous recent segment)
+    assert len(v1["trail"]) == 3
+    assert v1["trail"][0] == [-52.80, 47.50]
+    assert v1["trail"][1] == [-52.81, 47.51]
+    assert v1["trail"][2] == [-52.82, 47.52]
+
+    # Current position should be the most recent
+    assert abs(v1["longitude"] - (-52.82)) < 0.001
+
+    db.close()
+    os.unlink(path)
+
+
+def test_get_latest_positions_with_trails_no_gap():
+    """When all positions are within the gap threshold, the full trail is returned."""
+    db, path = make_db()
+    now = datetime.now(timezone.utc)
+
+    db.upsert_vehicles(
+        [{"vehicle_id": "v1", "description": "Plow 1", "vehicle_type": "LOADER"}], now
+    )
+    # 4 positions all 30s apart (well within 120s threshold)
+    from datetime import timedelta
+
+    base = datetime(2026, 2, 19, 12, 0, 0, tzinfo=timezone.utc)
+    positions = [
+        {
+            "vehicle_id": "v1",
+            "timestamp": base + timedelta(seconds=i * 30),
+            "longitude": -52.73 + i * 0.01,
+            "latitude": 47.56,
+            "bearing": 0,
+            "speed": 10.0,
+            "is_driving": "maybe",
+        }
+        for i in range(4)
+    ]
+    db.insert_positions(positions, now)
+
+    results = db.get_latest_positions_with_trails(trail_points=10)
+    assert len(results) == 1
+    # All 4 positions should be in the trail (no gaps to truncate)
+    assert len(results[0]["trail"]) == 4
 
     db.close()
     os.unlink(path)

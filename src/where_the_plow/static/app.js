@@ -28,14 +28,80 @@ class PlowMap {
 
     /* ── Vehicles ───────────────────────────────────── */
 
+    _createArrowIcon() {
+        const size = 32;
+        const data = new Uint8Array(size * size * 4);
+
+        // Draw a solid upward-pointing arrow using canvas for anti-aliasing,
+        // then read the pixels back for addImage.
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+
+        ctx.fillStyle = "white";
+        ctx.beginPath();
+        // Arrow pointing up: tip at top-center, wide base at bottom
+        ctx.moveTo(size / 2, 2);           // tip
+        ctx.lineTo(size - 4, size - 4);    // bottom-right
+        ctx.lineTo(size / 2, size - 10);   // notch
+        ctx.lineTo(4, size - 4);           // bottom-left
+        ctx.closePath();
+        ctx.fill();
+
+        const imgData = ctx.getImageData(0, 0, size, size);
+        data.set(imgData.data);
+
+        this.map.addImage("vehicle-arrow", { width: size, height: size, data }, { sdf: true });
+    }
+
     initVehicles(data) {
+        this._createArrowIcon();
         this.map.addSource("vehicles", { type: "geojson", data });
+
+        // Black outline layer — slightly larger, drawn first (behind)
+        this.map.addLayer({
+            id: "vehicle-outline",
+            type: "symbol",
+            source: "vehicles",
+            layout: {
+                "icon-image": "vehicle-arrow",
+                "icon-size": [
+                    "interpolate", ["linear"], ["zoom"],
+                    10, 0.55,
+                    13, 1.05,
+                    16, 1.6,
+                ],
+                "icon-rotate": ["get", "bearing"],
+                "icon-rotation-alignment": "map",
+                "icon-allow-overlap": true,
+                "icon-ignore-placement": true,
+            },
+            paint: {
+                "icon-color": "#000000",
+            },
+        });
+
+        // Colored foreground layer — drawn on top
         this.map.addLayer({
             id: "vehicle-circles",
-            type: "circle",
+            type: "symbol",
             source: "vehicles",
+            layout: {
+                "icon-image": "vehicle-arrow",
+                "icon-size": [
+                    "interpolate", ["linear"], ["zoom"],
+                    10, 0.4,
+                    13, 0.85,
+                    16, 1.4,
+                ],
+                "icon-rotate": ["get", "bearing"],
+                "icon-rotation-alignment": "map",
+                "icon-allow-overlap": true,
+                "icon-ignore-placement": true,
+            },
             paint: {
-                "circle-color": [
+                "icon-color": [
                     "match", ["get", "vehicle_type"],
                     "SA PLOW TRUCK", "#2563eb",
                     "TA PLOW TRUCK", "#2563eb",
@@ -43,9 +109,6 @@ class PlowMap {
                     "GRADER", "#16a34a",
                     "#6b7280",
                 ],
-                "circle-radius": 7,
-                "circle-stroke-color": "#ffffff",
-                "circle-stroke-width": 2,
             },
         });
     }
@@ -55,12 +118,11 @@ class PlowMap {
     }
 
     setVehiclesVisible(visible) {
-        if (this.map.getLayer("vehicle-circles")) {
-            this.map.setLayoutProperty(
-                "vehicle-circles",
-                "visibility",
-                visible ? "visible" : "none",
-            );
+        const vis = visible ? "visible" : "none";
+        for (const id of ["vehicle-outline", "vehicle-circles"]) {
+            if (this.map.getLayer(id)) {
+                this.map.setLayoutProperty(id, "visibility", vis);
+            }
         }
     }
 
@@ -77,8 +139,8 @@ class PlowMap {
                 type: "line",
                 source: "vehicle-trail-line",
                 paint: {
-                    "line-color": "#60a5fa",
-                    "line-width": 3,
+                    "line-color": ["get", "seg_color"],
+                    "line-width": 5,
                     "line-opacity": ["get", "seg_opacity"],
                 },
             },
@@ -91,8 +153,8 @@ class PlowMap {
                 type: "circle",
                 source: "vehicle-trail",
                 paint: {
-                    "circle-color": "#60a5fa",
-                    "circle-radius": 4,
+                    "circle-color": ["get", "trail_color"],
+                    "circle-radius": 2.5,
                     "circle-opacity": ["get", "trail_opacity"],
                     "circle-stroke-color": "#ffffff",
                     "circle-stroke-width": 1,
@@ -120,6 +182,37 @@ class PlowMap {
             this.map.removeSource("vehicle-trail");
         if (this.map.getSource("vehicle-trail-line"))
             this.map.removeSource("vehicle-trail-line");
+    }
+
+    /* ── Mini-trails (realtime) ─────────────────────── */
+
+    initMiniTrails(data) {
+        this.map.addSource("mini-trails", { type: "geojson", data });
+        this.map.addLayer(
+            {
+                id: "mini-trails",
+                type: "line",
+                source: "mini-trails",
+                paint: {
+                    "line-color": ["get", "color"],
+                    "line-width": 5,
+                    "line-opacity": ["get", "opacity"],
+                },
+            },
+            "vehicle-outline",
+        );
+    }
+
+    updateMiniTrails(data) {
+        const source = this.map.getSource("mini-trails");
+        if (source) source.setData(data);
+    }
+
+    setMiniTrailsVisible(visible) {
+        const vis = visible ? "visible" : "none";
+        if (this.map.getLayer("mini-trails")) {
+            this.map.setLayoutProperty("mini-trails", "visibility", vis);
+        }
     }
 
     /* ── Coverage ───────────────────────────────────── */
@@ -302,6 +395,28 @@ function vehicleColor(type) {
     return VEHICLE_COLORS[type] || DEFAULT_COLOR;
 }
 
+function buildMiniTrails(data) {
+    const features = [];
+    for (const f of data.features) {
+        const trail = f.properties.trail;
+        if (!trail || trail.length < 2) continue;
+        const color = vehicleColor(f.properties.vehicle_type);
+        const count = trail.length - 1;
+        for (let i = 0; i < count; i++) {
+            const opacity = count === 1 ? 0.7 : 0.15 + (i / (count - 1)) * 0.55;
+            features.push({
+                type: "Feature",
+                geometry: {
+                    type: "LineString",
+                    coordinates: [trail[i], trail[i + 1]],
+                },
+                properties: { color, opacity },
+            });
+        }
+    }
+    return { type: "FeatureCollection", features };
+}
+
 function formatTimestamp(ts) {
     const d = new Date(ts);
     return d.toLocaleString(undefined, {
@@ -356,6 +471,7 @@ function filterRecentFeatures(data) {
 
 /* ── Vehicle detail panel: DOM refs ─────────────────── */
 
+const vehicleHint = document.getElementById("vehicle-hint");
 const detailPanel = document.getElementById("vehicle-detail");
 const detailName = document.getElementById("detail-name");
 const detailType = document.getElementById("detail-type");
@@ -387,6 +503,7 @@ function addTrailOpacity(features) {
         properties: {
             ...f.properties,
             trail_opacity: count === 1 ? 0.7 : 0.15 + (i / (count - 1)) * 0.55,
+            trail_color: vehicleColor(f.properties.vehicle_type),
         },
     }));
 }
@@ -403,7 +520,10 @@ function buildTrailSegments(features) {
                     features[i + 1].geometry.coordinates,
                 ],
             },
-            properties: { seg_opacity: features[i].properties.trail_opacity },
+            properties: {
+                seg_opacity: features[i].properties.trail_opacity,
+                seg_color: features[i].properties.trail_color,
+            },
         });
     }
     return segments;
@@ -517,8 +637,10 @@ class PlowApp {
         coveragePanelEl.style.display = "none";
         this.coverageData = null;
         this.map.setVehiclesVisible(true);
+        this.map.setMiniTrailsVisible(true);
         document.getElementById("vehicle-count").style.display = "";
-        document.getElementById("db-size").style.display = "";
+        document.getElementById("db-size").style.display = "none";
+        vehicleHint.style.display = "";
         showLegend("vehicles");
         this.startAutoRefresh();
     }
@@ -531,8 +653,10 @@ class PlowApp {
         btnHeatmap.classList.remove("active");
         showLegend("vehicles");
         this.map.setVehiclesVisible(false);
+        this.map.setMiniTrailsVisible(false);
         document.getElementById("vehicle-count").style.display = "none";
         document.getElementById("db-size").style.display = "none";
+        vehicleHint.style.display = "none";
         coveragePanelEl.style.display = "block";
 
         this.coveragePreset = "24";
@@ -678,6 +802,7 @@ class PlowApp {
                 const rawData = await fetchVehicles();
                 const freshData = filterRecentFeatures(rawData);
                 this.map.updateVehicles(freshData);
+                this.map.updateMiniTrails(buildMiniTrails(freshData));
                 updateVehicleCount(freshData);
                 this.updateDetailFromData(freshData);
                 this.refreshTrail();
@@ -702,11 +827,13 @@ class PlowApp {
         detailSpeed.textContent = "Speed: " + p.speed + " km/h";
         detailBearing.textContent = "Bearing: " + p.bearing + "\u00B0";
         detailUpdated.textContent = "Updated: " + formatTimestamp(p.timestamp);
+        vehicleHint.style.display = "none";
         detailPanel.style.display = "block";
     }
 
     closeDetail() {
         detailPanel.style.display = "none";
+        vehicleHint.style.display = "";
         this.activeVehicleId = null;
         this.activeVehicleTimestamp = null;
         this.map.clearTrail();
@@ -808,6 +935,7 @@ plowMap.on("load", async () => {
     updateVehicleCount(data);
 
     plowMap.initVehicles(data);
+    plowMap.initMiniTrails(buildMiniTrails(data));
 
     plowMap.on("mouseenter", "vehicle-circles", () => {
         plowMap.getCanvas().style.cursor = "pointer";

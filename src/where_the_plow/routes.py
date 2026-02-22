@@ -1,8 +1,10 @@
 # src/where_the_plow/routes.py
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, Response
+from fastapi.responses import JSONResponse
 
+from where_the_plow import cache
 from where_the_plow.models import (
     CoverageFeature,
     CoverageFeatureCollection,
@@ -14,6 +16,7 @@ from where_the_plow.models import (
     Pagination,
     PointGeometry,
     StatsResponse,
+    ViewportTrack,
 )
 
 router = APIRouter()
@@ -76,6 +79,11 @@ def get_vehicles(
         None, description="Cursor: return features after this timestamp (ISO 8601)"
     ),
 ):
+    # Return cached realtime snapshot if available and no pagination cursor
+    store = getattr(request.app.state, "store", {})
+    if after is None and "realtime" in store:
+        return JSONResponse(content=store["realtime"])
+
     db = request.app.state.db
     rows = db.get_latest_positions(limit=limit, after=after)
     return _rows_to_feature_collection(rows, limit)
@@ -168,7 +176,15 @@ def get_coverage(
         since = now - timedelta(hours=24)
     if until is None:
         until = now
-    trails = db.get_coverage_trails(since=since, until=until)
+
+    # Check file cache (only hits for fully-historical queries)
+    cached = cache.get(since, until)
+    if cached is not None:
+        trails = cached
+    else:
+        trails = db.get_coverage_trails(since=since, until=until)
+        cache.put(since, until, trails)
+
     features = [
         CoverageFeature(
             geometry=LineStringGeometry(coordinates=t["coordinates"]),
@@ -204,3 +220,27 @@ def get_stats(request: Request):
         latest=latest.isoformat() if latest else None,
         db_size_bytes=stats.get("db_size_bytes"),
     )
+
+
+@router.post(
+    "/track",
+    status_code=204,
+    summary="Track viewport focus",
+    description="Records an anonymous viewport focus event for analytics. "
+    "Called by the frontend when a user settles on a map area.",
+    tags=["analytics"],
+)
+def track_viewport(request: Request, body: ViewportTrack):
+    db = request.app.state.db
+    sw = body.bounds.get("sw", [0, 0])
+    ne = body.bounds.get("ne", [0, 0])
+    db.insert_viewport(
+        zoom=body.zoom,
+        center_lng=body.center[0],
+        center_lat=body.center[1],
+        sw_lng=sw[0],
+        sw_lat=sw[1],
+        ne_lng=ne[0],
+        ne_lat=ne[1],
+    )
+    return Response(status_code=204)

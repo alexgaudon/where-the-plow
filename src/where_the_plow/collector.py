@@ -8,6 +8,7 @@ import httpx
 from where_the_plow.client import fetch_vehicles, parse_avl_response
 from where_the_plow.db import Database
 from where_the_plow.config import settings
+from where_the_plow.snapshot import build_realtime_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ def process_poll(db: Database, response: dict) -> int:
     return inserted
 
 
-async def run(db: Database):
+async def run(db: Database, store: dict):
     logger.info("Collector starting — polling every %ds", settings.poll_interval)
 
     stats = db.get_stats()
@@ -41,6 +42,7 @@ async def run(db: Database):
                     len(features),
                     inserted,
                 )
+                store["realtime"] = build_realtime_snapshot(db)
             except asyncio.CancelledError:
                 logger.info("Collector shutting down")
                 raise

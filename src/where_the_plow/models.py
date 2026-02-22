@@ -27,6 +27,9 @@ class FeatureProperties(BaseModel):
     bearing: int | None = Field(None, description="Heading in degrees (0-360)")
     is_driving: str | None = Field(None, description="Driving status: 'maybe' or 'no'")
     timestamp: str = Field(..., description="Position timestamp (ISO 8601)")
+    trail: list[list[float]] | None = Field(
+        None, description="Recent trail coordinates [[lng, lat], ...]"
+    )
 
 
 class Feature(BaseModel):
@@ -78,6 +81,20 @@ class CoverageFeature(BaseModel):
 class CoverageFeatureCollection(BaseModel):
     type: str = Field(default="FeatureCollection")
     features: list[CoverageFeature]
+
+
+class ViewportTrack(BaseModel):
+    zoom: float = Field(..., description="Current map zoom level")
+    center: list[float] = Field(
+        ...,
+        description="[longitude, latitude] of map center",
+        min_length=2,
+        max_length=2,
+    )
+    bounds: dict = Field(
+        ...,
+        description="Map bounds: {sw: [lng, lat], ne: [lng, lat]}",
+    )
 
 
 class StatsResponse(BaseModel):

@@ -17,7 +17,7 @@ def test_client():
         # Patch collector.run so it doesn't actually poll
         with patch("where_the_plow.collector.run", new_callable=AsyncMock) as mock_run:
             # Make the mock hang forever (simulating a long-running background task)
-            async def hang_forever(db):
+            async def hang_forever(db, store):
                 import asyncio
 
                 await asyncio.Event().wait()
